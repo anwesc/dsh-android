@@ -1,0 +1,22 @@
+# Build outputs
+build/
+app/build/
+.gradle/
+.toolchain/
+dist/
+*.apk
+*.aab
+*.idsig
+
+# Local machine configuration
+local.properties
+.idea/
+*.iml
+captures/
+
+# Runtime image (307 MB): regenerate with scripts/pack-runtime.sh
+app/src/main/assets/rootfs.bin
+
+# OS noise
+.DS_Store
+Thumbs.db

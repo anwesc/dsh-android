@@ -1,0 +1,20 @@
+/* Narrow-screen fixes for desktop-only plugin UIs (dsh-plugin market rows). */
+@media (max-width: 767px) {
+  [class*="qikqja_controls"] {
+    flex-wrap: wrap;
+    row-gap: 6px;
+    min-width: 0;
+    max-width: 100%;
+  }
+  [class*="qikqja_root"] {
+    min-width: 0;
+    max-width: 100%;
+  }
+  [class*="_3XaZHa_cardHead"],
+  [class*="_3XaZHa_cardMain"] {
+    min-width: 0;
+  }
+  [class*="_3XaZHa_cardHead"] > *:last-child {
+    flex-shrink: 0;
+  }
+}

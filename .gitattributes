@@ -1,0 +1,6 @@
+*.apk binary
+*.png binary
+*.jar binary
+*.so binary
+app/src/main/assets/runtime/proot binary
+app/src/main/assets/runtime/libexec/loader binary
