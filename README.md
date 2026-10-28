@@ -3,6 +3,20 @@
 DeepSeek Harness 的 Android 壳：把 dsh 运行时（Ubuntu arm64 + Node 24 + @deepseek-ai/dsh）打包进 APK，
 安装后**无需 Termux、无需联网**即可在手机上运行，并用全屏 WebView 展示界面。
 
+## 下载与安装
+
+现成安装包在 [Releases](https://github.com/anwesc/dsh-android/releases)：
+
+```
+https://github.com/anwesc/dsh-android/releases/download/v0.3.0/dsh-0.3.0-release.apk
+```
+
+- **只能侧载**（文件管理器点开安装 / `adb install -r dsh-0.3.0-release.apk`），无法上架 Google Play。
+- 首次启动解压约 20 秒（1.2 GB 运行时），之后冷启动约 20 秒；服务常驻时打开即用。
+- 小米/HyperOS 用 adb 安装新签名包时若报 `INSTALL_FAILED_USER_RESTRICTED`，
+  需在开发者选项里打开「USB 安装」，或直接在手机上点 APK 安装。
+- Android 16 上 adb 安装大包前建议先 `adb shell input keyevent KEYCODE_WAKEUP`，锁屏状态下会被自动拒绝。
+
 ## 架构
 
 ```
