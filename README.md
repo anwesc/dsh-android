@@ -29,6 +29,7 @@ proot -0 -r <rootfs> … /usr/local/bin/dsh web --no-open --port 3080
 | `app/src/main/assets/mobile.css` | 窄屏修补（第三方桌面式插件的溢出/换行） |
 | `app/src/main/assets/runtime/` | proot 与其动态库、`libexec/proot/loader` |
 | `app/src/main/assets/rootfs.bin` | gzip 压缩的 rootfs（**不入库**，见下） |
+| `artwork/dsh.jpg` | 图标源图（1254×1254），`res/mipmap-*` 由它生成 |
 | `dist/` | 构建产物（**不入库**） |
 
 ## 镜像自带工具
