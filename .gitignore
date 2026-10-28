@@ -20,3 +20,8 @@ app/src/main/assets/rootfs.bin
 # OS noise
 .DS_Store
 Thumbs.db
+
+# Signing material
+keystore.properties
+*.jks
+*.keystore

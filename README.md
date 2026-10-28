@@ -63,6 +63,19 @@ tar --hard-dereference -cf - -C <rootfs> . | gzip -1 > rootfs.bin
 
 `--hard-dereference` 是必需的：Android 禁止应用创建硬链接，镜像里的硬链接必须展开成实体文件。
 
+## 签名与发布
+
+`keystore.properties`（已 gitignore）保存签名参数，`dsh-release.jks` 是签名密钥：
+
+```bash
+./gradlew assembleRelease   # 输出 app/build/outputs/apk/release/app-release.apk
+```
+
+**务必备份 `dsh-release.jks` 与 `keystore.properties`**：换签名后无法覆盖安装，
+用户必须先卸载（本地运行时、会话、插件都会丢失）。
+
+debug 与 release 签名不同，两者不能互相覆盖：调试用 `assembleDebug`，分发用 `assembleRelease`。
+
 ## 已知限制
 
 - **APK ~307 MB**，首次安装解压约 20 s，之后冷启动约 20 s（proot 下模块解析的 stat 开销）。

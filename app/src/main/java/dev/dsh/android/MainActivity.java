@@ -152,7 +152,11 @@ public final class MainActivity extends Activity {
         filter.addAction(DshService.ACTION_READY);
         filter.addAction(DshService.ACTION_FAILED);
         filter.addAction(DshService.ACTION_PROGRESS);
-        registerReceiver(receiver, filter);
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(receiver, filter);
+        }
         receiverRegistered = true;
 
         startRuntime();
