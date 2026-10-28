@@ -34,7 +34,7 @@ final class RuntimeInstaller {
     /** Entry count of {@link #ROOTFS_ASSET}, used for unpack progress. */
     private static final int ROOTFS_ENTRIES = 86964;
     /** Layout version; bump when the extracted tree gains or loses files. */
-    private static final String LAYOUT_VERSION = "7";
+    private static final String LAYOUT_VERSION = "8";
 
     /** Receives coarse unpack progress for the notification and the loading screen. */
     interface Progress {

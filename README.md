@@ -31,6 +31,11 @@ proot -0 -r <rootfs> … /usr/local/bin/dsh web --no-open --port 3080
 | `app/src/main/assets/rootfs.bin` | gzip 压缩的 rootfs（**不入库**，见下） |
 | `dist/` | 构建产物（**不入库**） |
 
+## 镜像自带工具
+
+`curl`、`git`、`python3`、`xz`、`tar`、`gzip` 已预装（插件市场安装插件依赖 curl/git）。
+未装编译器（gcc/make），需要 node-gyp 的插件请自行 `apt-get install build-essential`。
+
 ## 构建
 
 需要 JDK 17+（Android Studio 自带 JBR 即可）与 Android SDK（platform 36、build-tools 36.1.0）。
