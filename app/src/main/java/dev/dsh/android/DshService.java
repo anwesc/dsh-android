@@ -197,7 +197,7 @@ public final class DshService extends Service {
         publishDocs(data);
         publishHome(data);
         command.add("-w");
-        command.add("/root");
+        command.add("/root/work");
         command.add("/usr/bin/env");
         command.add("-i");
         command.add("HOME=/root");
