@@ -18,3 +18,22 @@ curl -s -X POST http://127.0.0.1:3081/reload
 ```
 
 或在 App 里：设置 → 插件 → 添加插件。
+
+## 随 App 内置：qqbot-guard
+
+装了 `@tencent-connect/dsh-qqbot` 之后，群聊默认要求 @ 机器人才回复。App 自带一个补丁插件
+`dsh-qqbot-guard`，让群里出现关键词时也能触发对话（相当于帮你补一个 @）。
+
+- 关键词写在 `/root/.dsh/qqbot-guard.json`，首次启动自动生成：
+
+```json
+{
+  "triggers": ["大肥鱼", "肥鱼", "鱼鱼"],
+  "_note": "群聊里不 @ 也能触发回复的关键词；改完重启 App 生效。"
+}
+```
+
+- 改完关键词重启 App（或 POST `/reload`）即可，不用碰 YAML。
+- 想临时关掉：把这个 JSON 里的 `triggers` 改成 `[]`，或者在 profile 的 `cordis.patch.yml`
+  里给同 id 的 `qqbot-guard` 写 `triggers: []`。
+- 插件在每次启动时重新落盘，所以升级 App 或回滚配置都不会把它弄丢。

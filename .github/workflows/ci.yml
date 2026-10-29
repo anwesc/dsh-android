@@ -26,6 +26,11 @@ jobs:
       - name: Placeholder runtime image
         run: head -c 4096 /dev/urandom > app/src/main/assets/rootfs.bin
 
+      # The APK ships a generated copy of plugins/qqbot-guard; catch a stale copy here
+      # instead of discovering it on a device.
+      - name: Plugin seed in sync
+        run: scripts/sync-plugin-seed.sh --check
+
       - name: Assemble debug
         run: ./gradlew --no-daemon --console=plain assembleDebug
 

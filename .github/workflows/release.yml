@@ -59,6 +59,10 @@ jobs:
             echo "keyPassword=$KEY_PASSWORD"
           } > keystore.properties
 
+      # Refuse to ship an APK whose bundled plugin copy lags plugins/qqbot-guard.
+      - name: Plugin seed in sync
+        run: scripts/sync-plugin-seed.sh --check
+
       - name: Lint (NewApi is fatal)
         run: ./gradlew --no-daemon --console=plain lintRelease
 

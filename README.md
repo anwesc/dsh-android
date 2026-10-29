@@ -39,7 +39,8 @@ proot -0 -r <rootfs> … /usr/local/bin/dsh web --no-open --port <空闲端口>
 
 | 路径 | 说明 |
 |---|---|
-| `app/src/main/java/dev/dsh/android/` | MainActivity、DshService、RuntimeInstaller、UserData、BootReceiver |
+| `app/src/main/java/dev/dsh/android/` | MainActivity、DshService、RuntimeInstaller、UserData、BootReceiver、PluginSeed |
+| `app/src/main/assets/plugin-seed/` | 每次启动被 `PluginSeed` 拷进 profile 的内置插件（生成目录，见下） |
 | `app/src/main/assets/mobile.css` | 窄屏修补（第三方桌面式插件的溢出/换行） |
 | `app/src/main/assets/runtime/` | proot 与其动态库、`libexec/proot/loader` |
 | `app/src/main/assets/rootfs.bin` | gzip 压缩的 rootfs（**不入库**，见下） |
@@ -90,6 +91,25 @@ tar --hard-dereference -cf - -C <rootfs> . | gzip -1 > rootfs.bin
 用户必须先卸载（本地运行时、会话、插件都会丢失）。
 
 debug 与 release 签名不同，两者不能互相覆盖：调试用 `assembleDebug`，分发用 `assembleRelease`。
+
+## 内置插件（plugin-seed）
+
+`plugins/qqbot-guard/` 是随 App 分发的补丁插件：装了 QQ 通道后，群里出现关键词也能触发对话。
+源码在仓库里，**装进 APK 的副本是生成物**：
+
+```bash
+scripts/sync-plugin-seed.sh          # plugins/qqbot-guard → assets/plugin-seed/dsh-qqbot-guard
+scripts/sync-plugin-seed.sh --check  # CI 用：副本过期则非零退出
+```
+
+启动时 `PluginSeed.install()` 在 `SafetyNet.beginBoot()` 之前做三件事（幂等）：
+
+1. 把资产拷进 `rootfs/root/.dsh/profiles/web/node_modules/dsh-qqbot-guard`；
+2. 把 `dsh-qqbot-guard` 并入 profile `package.json` 的 `dsh.profile.bundles`；
+3. 首次启动写 `/root/.dsh/qqbot-guard.json`（关键词 `大肥鱼`/`肥鱼`/`鱼鱼`），已存在则不覆盖。
+
+故意不写 `dependencies`：`file:` 依赖会绑死容器路径，而 loader 只按名字从 `node_modules` 解析。
+升级时 `RuntimeInstaller.migrateProfile()` 会用旧 profile 覆盖新解包的 profile，seed 在之后跑，正好补回。
 
 ## 让助手重启服务
 

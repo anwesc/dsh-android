@@ -146,6 +146,9 @@ public final class DshService extends Service {
             }
             Log.i(TAG, "runtime ready in " + (System.currentTimeMillis() - started) + "ms");
             runtimeDir = runtime;
+            // Seed the bundled plugin before SafetyNet snapshots the profile, so the copy it
+            // records as "good" already contains the plugin.
+            PluginSeed.install(this, runtime);
             boolean previousBootFailed = safetyNet.beginBoot();
             startControlServer();
             startServer(runtime);
