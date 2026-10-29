@@ -30,6 +30,7 @@ final class SafetyNet {
     /** Marker written before a boot attempt, removed once the harness reports its URL. */
     private static final String PENDING = "boot.pending";
     private static final String GOOD = "last-good";
+    private static final String GOOD_META = "last-good.meta";
 
     private final File state;
 
@@ -70,6 +71,8 @@ final class SafetyNet {
         try {
             deleteTree(target);
             copyConfig(profileDir(runtime), target);
+            Files.write(new File(state, GOOD_META).toPath(),
+                    String.valueOf(System.currentTimeMillis()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
             Files.deleteIfExists(new File(state, PENDING).toPath());
         } catch (IOException error) {
             Log.w(TAG, "cannot snapshot profile", error);
@@ -104,6 +107,62 @@ final class SafetyNet {
      */
     boolean hasGood() {
         return new File(state, GOOD).isDirectory();
+    }
+
+    /**
+     * Copy the snapshot into a directory the file manager can open.
+     *
+     * @param destination visible directory, replaced on every call
+     * @return number of files copied, or 0 when no snapshot exists
+     */
+    int mirrorTo(File destination) {
+        File source = new File(state, GOOD);
+        if (!source.isDirectory()) {
+            return 0;
+        }
+        try {
+            if (!destination.isDirectory() && !destination.mkdirs()) {
+                throw new IOException("cannot create " + destination);
+            }
+            File[] children = source.listFiles();
+            int copied = 0;
+            if (children != null) {
+                for (File child : children) {
+                    java.nio.file.Files.copy(child.toPath(),
+                            new File(destination, child.getName()).toPath(),
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    copied++;
+                }
+            }
+            java.nio.file.Files.write(new File(destination, "meta.txt").toPath(),
+                    ("backup " + describeGood() + System.lineSeparator()).getBytes(
+                            java.nio.charset.StandardCharsets.UTF_8));
+            return copied;
+        } catch (IOException error) {
+            Log.w(TAG, "cannot mirror snapshot", error);
+            return 0;
+        }
+    }
+
+    /**
+     * Describe the snapshot: when it was taken and where it lives.
+     *
+     * @return human readable description, or "无" when nothing is stored
+     */
+    String describeGood() {
+        if (!hasGood()) {
+            return "无";
+        }
+        String stamp = "时间未知";
+        try {
+            byte[] raw = java.nio.file.Files.readAllBytes(new File(state, GOOD_META).toPath());
+            long millis = Long.parseLong(new String(raw, java.nio.charset.StandardCharsets.UTF_8).trim());
+            stamp = new java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.US)
+                    .format(new java.util.Date(millis));
+        } catch (IOException | NumberFormatException ignored) {
+            // missing metadata: the snapshot predates it
+        }
+        return stamp + "（" + new File(state, GOOD).getAbsolutePath() + "）";
     }
 
     private void copyConfig(File from, File to) throws IOException {

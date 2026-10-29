@@ -22,10 +22,13 @@ final class UserData {
     final File work;
     /** Mirror of the harness home (sessions, plugins, settings) for the file manager. */
     final File dsh;
+    /** Visible copy of the known-good profile snapshot. */
+    final File backup;
 
-    private UserData(File work, File dsh) {
+    private UserData(File work, File dsh, File backup) {
         this.work = work;
         this.dsh = dsh;
+        this.backup = backup;
     }
 
     /**
@@ -45,8 +48,8 @@ final class UserData {
             work = new File(root, "work");
         }
         ensure(work);
-        File dsh = new File(shared != null ? shared : new File(context.getFilesDir(), "userdata"), "dsh");
-        return new UserData(work, dsh);
+        File root = shared != null ? shared : new File(context.getFilesDir(), "userdata");
+        return new UserData(work, new File(root, "dsh"), new File(root, "backup"));
     }
 
     private static void ensure(File dir) throws IOException {

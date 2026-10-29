@@ -35,9 +35,20 @@ final class DshHomeExporter {
         if (!source.isDirectory()) {
             throw new IOException("no harness home at " + source);
         }
-        deleteRecursively(destination);
-        if (!destination.mkdirs()) {
-            throw new IOException("cannot create " + destination);
+        // Keep the root directory and clear its contents: File.mkdirs() reports false when the
+        // directory already exists, and a previous install may have created it under another uid.
+        if (destination.isDirectory()) {
+            File[] children = destination.listFiles();
+            if (children != null) {
+                for (File child : children) {
+                    deleteRecursively(child);
+                }
+            }
+        } else {
+            deleteRecursively(destination);
+            if (!destination.mkdirs()) {
+                throw new IOException("cannot create " + destination);
+            }
         }
         Path from = source.toPath();
         Path to = destination.toPath();
