@@ -101,7 +101,9 @@ debug 与 release 签名不同，两者不能互相覆盖：调试用 `assembleD
 | `POST /restart` | 重启 `dsh web`，新 token 自动推给页面 |
 | `GET /` | 返回当前 URL |
 | `POST /backup` | 把当前 profile 配置记为 last-good |
-| `POST /restore` | 回滚到 last-good 并重启 |
+| `POST /restore` | 回滚到 last-good 并重启（启动失败时 App 弹窗请求确认，不自动覆盖） |
+| `GET /update/auto` | 查询是否自动检查更新 |
+| `POST /update/auto?enabled=false` | 关闭启动时的自动更新检查 |
 | `POST /export` | 把家目录镜像到 `/sdcard/DSH/dsh` |
 | `POST /update` | 检查 App 新版本（下载并拉起安装器） |
 
@@ -113,6 +115,18 @@ curl -s -X POST http://127.0.0.1:3081/restart
 ```
 
 端口被占用时（例如旧进程残留），服务会自动改用 3082–3099 里的空闲端口，URL 也随之变化。
+
+## 控制面板
+
+控制面板入口（无悬浮按钮）：**启动页长按**，或启动后**长按页面左侧图标栏**；也可 `adb shell am start -n dev.dsh.android/.ControlActivity`：
+
+| 项 | 作用 |
+|---|---|
+| 启动时自动检查更新 | 开关；关掉后只保留手动 `POST /update` |
+| 刷新页面 / 重启服务 | 对应 `POST /reload`、`POST /restart` |
+| 检查更新 | `POST /update`，下载并拉起系统安装器 |
+| 导出家目录 | `POST /export` |
+| 备份当前配置 / 回滚 | `POST /backup`、`POST /restore` |
 
 ## CI 出包
 

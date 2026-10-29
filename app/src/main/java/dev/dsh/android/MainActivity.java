@@ -6,6 +6,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.Manifest;
 import android.content.IntentFilter;
+import android.app.AlertDialog;
 import android.widget.Toast;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
@@ -38,7 +39,11 @@ public final class MainActivity extends Activity {
     private static final String STYLE_ID = "dsh-mobile-fix";
     private static final int REQUEST_STORAGE = 1001;
 
+    /** Intent extra asking the activity to open the maintenance panel. */
+    static final String EXTRA_OPEN_PANEL = "panel";
+
     private WebView webView;
+    private FrameLayout rootView;
     private TextView statusView;
     private Bridge webViewBridge;
 
@@ -61,6 +66,8 @@ public final class MainActivity extends Activity {
                 showStatus("启动失败：" + intent.getStringExtra(DshService.EXTRA_ERROR));
             } else if (DshService.ACTION_CHECK_UPDATE.equals(action)) {
                 checkForUpdates();
+            } else if (DshService.ACTION_RESTORE_PROMPT.equals(action)) {
+                promptRestore();
             } else if (DshService.ACTION_RELOAD.equals(action)) {
                 if (webView != null) {
                     webView.reload();
@@ -129,22 +136,61 @@ public final class MainActivity extends Activity {
             }
         });
 
+        // Long press on the page's left rail opens the panel; it never reaches a text field, so
+        // selection inside the composer keeps working.
+        final float railWidth = 140 * getResources().getDisplayMetrics().density;
+        final android.os.Handler longPress = new android.os.Handler(getMainLooper());
+        final Runnable openPanel = () -> ControlPanel.show(this, this::showBanner);
+        final float[] downAt = new float[2];
+        webView.setOnTouchListener((view, event) -> {
+            switch (event.getActionMasked()) {
+                case android.view.MotionEvent.ACTION_DOWN:
+                    downAt[0] = event.getX();
+                    downAt[1] = event.getY();
+                    if (downAt[0] < railWidth) {
+                        longPress.postDelayed(openPanel, 650);
+                    }
+                    break;
+                case android.view.MotionEvent.ACTION_MOVE:
+                    // A scroll gesture cancels the press; tiny jitter does not.
+                    if (Math.abs(event.getX() - downAt[0]) > 24 || Math.abs(event.getY() - downAt[1]) > 24) {
+                        longPress.removeCallbacks(openPanel);
+                    }
+                    break;
+                default:
+                    longPress.removeCallbacks(openPanel);
+                    break;
+            }
+            return false;
+        });
+
         statusView = new TextView(this);
         statusView.setGravity(Gravity.CENTER);
         statusView.setTextColor(Color.parseColor("#DDDDDD"));
         statusView.setTextSize(16f);
         statusView.setPadding(48, 48, 48, 48);
         statusView.setBackgroundColor(Color.parseColor("#111111"));
+        // The splash overlay stays visible when boot fails, so a long press always reaches the panel.
+        statusView.setOnLongClickListener(view -> {
+            ControlPanel.show(this, this::showBanner);
+            return true;
+        });
 
         FrameLayout root = new FrameLayout(this);
         root.addView(webView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         root.addView(statusView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        rootView = root;
         setContentView(root);
         showStatus("正在启动 DeepSeek Harness…");
 
         // Test hook: an explicit url extra bypasses the bundled runtime.
+        if (getIntent().getBooleanExtra(EXTRA_OPEN_PANEL, false)) {
+            getIntent().removeExtra(EXTRA_OPEN_PANEL);
+            statusView.postDelayed(() -> ControlPanel.show(this, this::showBanner), 400);
+        }
         String debugUrl = getIntent().getStringExtra("url");
         if (debugUrl != null && !debugUrl.isEmpty()) {
             webView.loadUrl(debugUrl);
@@ -161,6 +207,7 @@ public final class MainActivity extends Activity {
         filter.addAction(DshService.ACTION_PROGRESS);
         filter.addAction(DshService.ACTION_RELOAD);
         filter.addAction(DshService.ACTION_CHECK_UPDATE);
+        filter.addAction(DshService.ACTION_RESTORE_PROMPT);
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
         } else {
@@ -169,7 +216,9 @@ public final class MainActivity extends Activity {
         receiverRegistered = true;
 
         startRuntime();
-        checkForUpdates();
+        if (getSharedPreferences("dsh", MODE_PRIVATE).getBoolean("auto_update", true)) {
+            checkForUpdates();
+        }
         if (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
                 != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{
@@ -245,6 +294,28 @@ public final class MainActivity extends Activity {
         }
     }
 
+    /**
+     * Ask before rolling the profile back: the rollback discards whatever the agent edited.
+     */
+    private void promptRestore() {
+        runOnUiThread(() -> {
+            if (isFinishing()) {
+                return;
+            }
+            new AlertDialog.Builder(this)
+                    .setTitle("启动失败")
+                    .setMessage("检测到 DSH 无法启动，可能配置文件被修改。\n\n"
+                            + "回滚会用上一次成功启动的配置覆盖当前配置，期间新增的改动会丢失。")
+                    .setPositiveButton("回滚并重启", (dialog, which) -> {
+                        Intent intent = new Intent(this, DshService.class)
+                                .setAction(DshService.ACTION_DO_RESTORE);
+                        startForegroundService(intent);
+                    })
+                    .setNegativeButton("保持现状", null)
+                    .show();
+        });
+    }
+
     /** Look for a newer published APK in the background and offer to install it. */
     private void checkForUpdates() {
         Thread thread = new Thread(() -> {
@@ -301,6 +372,52 @@ public final class MainActivity extends Activity {
     }
 
     /** Bridges page calls into the app: sign-in URLs go to the system browser. */
+    /** Banner shown near the top of the screen for panel results. */
+    private TextView bannerView;
+
+    /**
+     * Show a short message in the upper part of the screen and fade it out.
+     *
+     * @param text message to show
+     */
+    private void showBanner(String text) {
+        runOnUiThread(() -> {
+            if (rootView == null) {
+                return;
+            }
+            if (true) {
+                Toast toast = Toast.makeText(this, text, Toast.LENGTH_SHORT);
+                toast.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL, 0, (int) (96 * getResources().getDisplayMetrics().density));
+                toast.show();
+                return;
+            }
+            if (bannerView == null) {
+                bannerView = new TextView(this);
+                bannerView.setTextColor(0xFFF0F0F0);
+                bannerView.setTextSize(13f);
+                bannerView.setPadding(40, 24, 40, 24);
+                android.graphics.drawable.GradientDrawable background =
+                        new android.graphics.drawable.GradientDrawable();
+                background.setColor(0xF21F1F22);
+                background.setCornerRadius(28f);
+                bannerView.setBackground(background);
+                FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                        Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+                params.topMargin = (int) (72 * getResources().getDisplayMetrics().density);
+                rootView.addView(bannerView, params);
+            }
+            bannerView.animate().cancel();
+            bannerView.setText(text);
+            bannerView.setAlpha(0f);
+            bannerView.setVisibility(android.view.View.VISIBLE);
+            bannerView.animate().alpha(1f).setDuration(140).withEndAction(() ->
+                    bannerView.animate().alpha(0f).setStartDelay(2200).setDuration(240)
+                            .withEndAction(() -> bannerView.setVisibility(android.view.View.INVISIBLE))
+                            .start()).start();
+        });
+    }
+
     private final class Bridge {
         /**
          * Open a URL outside the WebView.
@@ -313,6 +430,12 @@ public final class MainActivity extends Activity {
                 return;
             }
             runOnUiThread(() -> openExternally(Uri.parse(url)));
+        }
+
+        /** Open the maintenance panel from the in-page button. */
+        @JavascriptInterface
+        public void panel() {
+            runOnUiThread(() -> ControlPanel.show(MainActivity.this, MainActivity.this::showBanner));
         }
     }
 

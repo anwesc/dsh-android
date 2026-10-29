@@ -41,6 +41,14 @@ public final class DshService extends Service {
     static final String ACTION_RELOAD = "dev.dsh.android.action.RELOAD";
     /** Broadcast action asking the activity to check for an app update. */
     static final String ACTION_CHECK_UPDATE = "dev.dsh.android.action.CHECK_UPDATE";
+    /** Broadcast action telling the activity that a failed boot can be rolled back. */
+    static final String ACTION_RESTORE_PROMPT = "dev.dsh.android.action.RESTORE_PROMPT";
+    /** Service action that performs the rollback the user confirmed. */
+    static final String ACTION_DO_RESTORE = "dev.dsh.android.action.DO_RESTORE";
+    /** Service action that restarts the harness without going through the control port. */
+    static final String ACTION_DO_RESTART = "dev.dsh.android.action.DO_RESTART";
+    /** Preference storing whether the app checks for updates on its own. */
+    private static final String PREF_AUTO_UPDATE = "auto_update";
     /** Loopback control port for restart/reload requests from inside the container. */
     private static final int CONTROL_PORT = 3081;
     /** Intent extra holding the progress line. */
@@ -81,6 +89,20 @@ public final class DshService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && ACTION_DO_RESTART.equals(intent.getAction())) {
+            startForeground(NOTIFICATION_ID, buildNotification("正在重启服务…"));
+            restartHarness();
+            return START_STICKY;
+        }
+        if (intent != null && ACTION_DO_RESTORE.equals(intent.getAction())) {
+            startForeground(NOTIFICATION_ID, buildNotification("正在回滚配置…"));
+            boolean restored = safetyNet != null && safetyNet.restore(runtimeDir);
+            Log.i(TAG, "manual rollback: " + restored);
+            if (restored) {
+                restartHarness();
+            }
+            return START_STICKY;
+        }
         startForeground(NOTIFICATION_ID, buildNotification("正在启动 DeepSeek Harness…"));
 
         String known = currentUrl;
@@ -112,15 +134,12 @@ public final class DshService extends Service {
             }
             Log.i(TAG, "runtime ready in " + (System.currentTimeMillis() - started) + "ms");
             runtimeDir = runtime;
-            if (safetyNet.beginBoot() && safetyNet.hasGood()) {
-                // The previous attempt never reached a served URL: put the good config back.
-                safetyNet.restore(runtime);
-            }
+            boolean previousBootFailed = safetyNet.beginBoot();
             startControlServer();
             startServer(runtime);
-            if (currentUrl == null && safetyNet.hasGood() && safetyNet.restore(runtime)) {
-                Log.w(TAG, "harness exited without a URL; retrying with the last good configuration");
-                startServer(runtime);
+            if (currentUrl == null && safetyNet.hasGood()) {
+                // Rolling back discards whatever the agent edited, so it needs a human decision.
+                requestRestoreConfirm(previousBootFailed);
             }
         } catch (Throwable error) {
             if (restarting) {
@@ -220,6 +239,7 @@ public final class DshService extends Service {
                     currentUrl = matcher.group(1);
                     if (safetyNet != null) {
                         safetyNet.markGood(runtime);
+                        mirrorBackup();
                     }
                     updateNotification("已就绪");
                     broadcast(ACTION_READY, EXTRA_URL, currentUrl);
@@ -237,6 +257,34 @@ public final class DshService extends Service {
         currentUrl = null;
         broadcast(ACTION_FAILED, EXTRA_ERROR, "harness exited with " + status);
         stopSelf();
+    }
+
+    /**
+     * Ask the user whether to roll the profile back to the last configuration that started.
+     *
+     * @param previousBootFailed whether the previous attempt also failed
+     */
+    private void requestRestoreConfirm(boolean previousBootFailed) {
+        Log.w(TAG, "boot failed; offering rollback (previous failure: " + previousBootFailed + ")");
+        broadcast(ACTION_RESTORE_PROMPT, EXTRA_PROGRESS, "boot failed");
+        android.app.NotificationManager manager =
+                (android.app.NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        if (manager == null) {
+            return;
+        }
+        android.content.Intent restore = new android.content.Intent(this, DshService.class)
+                .setAction(ACTION_DO_RESTORE);
+        android.app.PendingIntent pending = android.app.PendingIntent.getService(
+                this, 1, restore,
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT | android.app.PendingIntent.FLAG_IMMUTABLE);
+        android.app.Notification notification = new Notification.Builder(this, CHANNEL_ID)
+                .setContentTitle("DSH 启动失败")
+                .setContentText("配置可能被修改。点击回滚到上一次可用的配置。")
+                .setSmallIcon(android.R.drawable.stat_notify_error)
+                .setContentIntent(pending)
+                .setAutoCancel(true)
+                .build();
+        manager.notify(NOTIFICATION_ID + 1, notification);
     }
 
     /**
@@ -266,22 +314,37 @@ public final class DshService extends Service {
         BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
         String requestLine = reader.readLine();
         String body;
-        if (requestLine != null && requestLine.startsWith("POST /update")) {
-            broadcast(ACTION_CHECK_UPDATE, EXTRA_PROGRESS, "");
-            body = "{\"status\":\"checking\"}";
+        if (requestLine != null && requestLine.startsWith("GET /update/auto")) {
+            body = "{\"enabled\":" + autoUpdateEnabled() + "}";
+        } else if (requestLine != null && requestLine.startsWith("POST /update/auto")) {
+            boolean enabled = !requestLine.contains("enabled=false");
+            setAutoUpdate(enabled);
+            body = "{\"enabled\":" + enabled + "}";
+        } else if (requestLine != null && requestLine.startsWith("POST /update")) {
+            body = updateStatus();
         } else if (requestLine != null && requestLine.startsWith("POST /restore")) {
+            String from = safetyNet == null ? "无" : safetyNet.describeGood();
             boolean restored = safetyNet != null && safetyNet.restore(runtimeDir);
-            body = "{\"status\":\"" + (restored ? "restored" : "no-backup") + "\"}";
+            body = "{\"status\":\"" + (restored ? "restored" : "no-backup")
+                    + "\",\"from\":\"" + from.replace("\"", "") + "\"}";
             if (restored) {
                 restartHarness();
             }
+
         } else if (requestLine != null && requestLine.startsWith("POST /backup")) {
             boolean ok = false;
+            String where = "";
             if (safetyNet != null && runtimeDir != null) {
                 safetyNet.markGood(runtimeDir);
                 ok = safetyNet.hasGood();
+                where = safetyNet.describeGood();
+                UserData data = sharedDirs;
+                if (ok && data != null && safetyNet.mirrorTo(data.backup) > 0) {
+                    where = where + " / " + data.backup.getAbsolutePath();
+                }
             }
-            body = "{\"status\":\"" + (ok ? "backed-up" : "failed") + "\"}";
+            body = "{\"status\":\"" + (ok ? "backed-up" : "failed")
+                    + "\",\"at\":\"" + where.replace("\"", "") + "\"}";
         } else if (requestLine != null && requestLine.startsWith("POST /export")) {
             publishHome(null);
             body = "{\"status\":\"exporting\"}";
@@ -468,6 +531,60 @@ public final class DshService extends Service {
         return out.toByteArray();
     }
 
+    /** Refresh the visible copy of the known-good snapshot. */
+    private void mirrorBackup() {
+        UserData data = sharedDirs;
+        if (safetyNet == null || data == null) {
+            return;
+        }
+        Thread thread = new Thread(() -> {
+            int files = safetyNet.mirrorTo(data.backup);
+            if (files > 0) {
+                Log.i(TAG, "mirrored " + files + " config files to " + data.backup);
+            }
+        }, "dsh-backup-mirror");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    /**
+     * Check the release feed and report the outcome for the control endpoint.
+     *
+     * @return JSON body describing the check result
+     */
+    private String updateStatus() {
+        try {
+            UpdateChecker.Release release = UpdateChecker.latest();
+            String current = UpdateChecker.currentVersion(this);
+            if (release != null && UpdateChecker.isNewer(release.version, current)) {
+                broadcast(ACTION_CHECK_UPDATE, EXTRA_PROGRESS, "");
+                return "{\"status\":\"update\",\"version\":\"" + release.version + "\"}";
+            }
+            return "{\"status\":\"latest\",\"version\":\"" + current + "\"}";
+        } catch (IOException offline) {
+            Log.w(TAG, "update check failed", offline);
+            return "{\"status\":\"offline\"}";
+        }
+    }
+
+    /**
+     * Whether the app may check for updates on its own.
+     *
+     * @return true when automatic checks are enabled
+     */
+    private boolean autoUpdateEnabled() {
+        return getSharedPreferences("dsh", MODE_PRIVATE).getBoolean(PREF_AUTO_UPDATE, true);
+    }
+
+    /**
+     * Persist the automatic update preference.
+     *
+     * @param enabled new value
+     */
+    private void setAutoUpdate(boolean enabled) {
+        getSharedPreferences("dsh", MODE_PRIVATE).edit().putBoolean(PREF_AUTO_UPDATE, enabled).apply();
+    }
+
     private void createChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             return;
@@ -483,10 +600,19 @@ public final class DshService extends Service {
     }
 
     private Notification buildNotification(String text) {
+        android.content.Intent panel = new android.content.Intent(this, PanelReceiver.class);
+        android.app.PendingIntent open = android.app.PendingIntent.getBroadcast(
+                this, 43, panel,
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT | android.app.PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Builder(this, CHANNEL_ID)
                 .setContentTitle("DeepSeek Harness")
                 .setContentText(text)
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
+                .setContentIntent(open)
+                .addAction(new Notification.Action.Builder(
+                        android.graphics.drawable.Icon.createWithResource(this,
+                                android.R.drawable.ic_menu_manage),
+                        "控制面板", open).build())
                 .setOngoing(true)
                 .build();
     }
