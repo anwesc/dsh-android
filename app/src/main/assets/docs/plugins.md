@@ -28,12 +28,15 @@ curl -s -X POST http://127.0.0.1:3081/reload
 
 ```json
 {
+  "enabled": true,
   "triggers": ["大肥鱼", "肥鱼", "鱼鱼"],
-  "_note": "群聊里不 @ 也能触发回复的关键词；改完重启 App 生效。"
+  "_note": "enabled=false 可整体关掉关键词放行；triggers 是群里不 @ 也能触发回复的词；改完重启 App 生效。"
 }
 ```
 
 - 改完关键词重启 App（或 POST `/reload`）即可，不用碰 YAML。
-- 想临时关掉：把这个 JSON 里的 `triggers` 改成 `[]`，或者在 profile 的 `cordis.patch.yml`
-  里给同 id 的 `qqbot-guard` 写 `triggers: []`。
+- 群历史里会保留图片/语音/文件的摘要（`[图片「a.png」]`），表情占位符会被还原成 emoji；
+  两个都可在同一个 JSON 里关掉：`"faces": false`、`"historyAttachments": false`。
+- 想整体关掉这个补丁：把 `enabled` 改成 `false`（此时插件完全不改 qqbot 行为，回到只认 @）；
+  想只关关键词、保留其他诊断，把 `triggers` 改成 `[]`。
 - 插件在每次启动时重新落盘，所以升级 App 或回滚配置都不会把它弄丢。

@@ -159,12 +159,13 @@ final class PluginSeed {
         }
         try {
             JSONObject json = new JSONObject();
+            json.put("enabled", true);
             JSONArray triggers = new JSONArray();
             for (String trigger : DEFAULT_TRIGGERS) {
                 triggers.put(trigger);
             }
             json.put("triggers", triggers);
-            json.put("_note", "群聊里不 @ 也能触发回复的关键词；改完重启 App 生效。");
+            json.put("_note", "enabled=false 可整体关掉关键词放行；triggers 是群里不 @ 也能触发回复的词；改完重启 App 生效。");
             if (!home.isDirectory() && !home.mkdirs()) {
                 throw new IOException("cannot create " + home);
             }

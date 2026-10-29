@@ -29,7 +29,7 @@ jobs:
       # The APK ships a generated copy of plugins/qqbot-guard; catch a stale copy here
       # instead of discovering it on a device.
       - name: Plugin seed in sync
-        run: scripts/sync-plugin-seed.sh --check
+        run: bash scripts/sync-plugin-seed.sh --check
 
       - name: Assemble debug
         run: ./gradlew --no-daemon --console=plain assembleDebug

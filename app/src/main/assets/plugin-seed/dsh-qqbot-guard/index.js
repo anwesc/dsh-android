@@ -10,12 +10,18 @@
  *   - 不抢 `bot.use` 的调用时机，改为懒注入：
  *     重写 `QQBot.prototype.handleInboundMessage`，首条入站消息时才把 guard
  *     `unshift` 到 `this.middlewares` 头部，因此**与插件加载顺序无关**。
- *   - guard 命中关键词时，在正文前加 `<@appId>`，让 mentionGate 自己判定
- *     `wasMentioned=true`，从而触发 qqbot inbound 的历史拼接；随后
- *     contentSanitizer 会把标记洗掉，模型看到的是干净文本。
+ *   - guard 命中关键词时给 `msg.mentions` 补一条 `{ is_you: true }`，让 mentionGate
+ *     自己判定 `wasMentioned=true`，从而触发 inbound 的历史拼接。**不改正文**：
+ *     historyBuffer 在门控之前记录 content，早年往正文里插 `<@appId>` 的做法会把标记
+ *     带进历史条目，模型在 `[Chat history begins]` 里看到 `<@102000000> …`。
+ *     slashCommand 也认 `mentions[].is_you`，所以斜杠命令照旧可用。
+ *   - 顺带把正文里的两类“机器标记”换成可读文本（只改 content，不改附件本体）：
+ *     新版表情标签 `<faceType=…,faceId="N",ext="…">` → emoji 或 `[表情]`；
+ *     群历史里只存 content，附件会整条消失，所以在读历史时补一句附件摘要
+ *     （含本地路径——落盘名带随机后缀，只能读的时候按前缀去 media 目录里找）。
  */
 import { pathToFileURL } from 'node:url';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -30,6 +36,8 @@ const SDK_MAX_EXCLUSIVE = [2, 0, 0];
 const PATCH_FLAG = Symbol.for('qqbot-guard.handleInboundMessage');
 
 export const DEFAULT_CONFIG = {
+  /** 总开关：false 时插件什么都不做（纯直通，不改 qqbot 的任何行为） */
+  enabled: true,
   /** 关键词放行：正文包含任一词即视为对我说话（不 @ 也可） */
   triggers: ['大肥鱼', '肥鱼', '鱼鱼'],
   /** 关键词匹配是否忽略大小写 */
@@ -42,6 +50,18 @@ export const DEFAULT_CONFIG = {
    * 优先级：这里的 cordis 配置 > JSON 文件 > DEFAULT_CONFIG。
    */
   configFile: '',
+  /** 把新版表情标签 `<faceType=…>` 换成 emoji（映射不到时给 `[表情]`），默认开 */
+  faces: true,
+  /** 群历史只存 content，附件会丢；读历史时补一句 `[图片「x.png」@/…]`，默认开 */
+  historyAttachments: true,
+  /**
+   * 历史附件要不要顺手落盘，默认开。
+   * qqbot 的 `attachmentProcessor` 排在 mentionGate 之后，没触发关键词的群消息走不到它，
+   * 附件就永远不会下载——历史里只剩文件名、点开是空的。
+   */
+  historyMedia: true,
+  /** 预下载的体积上限（MB），语义同 qqbot 的 media.maxMB */
+  historyMediaMaxMB: 20,
   /** SDK 版本超出白名单时是否仍然安装（默认只告警） */
   strictVersion: false,
   /** 是否输出诊断日志 */
@@ -51,12 +71,26 @@ export const DEFAULT_CONFIG = {
 // ────────────────────────── 工具 ──────────────────────────
 
 function pickLogger(ctx) {
-  const l = ctx?.logger ?? console;
+  // cordis 的 ctx.logger 是函数（`ctx.logger('name')` 返回 logger），
+  // 但测试与旧版本也可能直接给一个带 info/warn 的对象，两种都接。
+  let l = ctx?.logger ?? console;
+  if (typeof l === 'function') {
+    try {
+      l = l('qqbot-guard') ?? console;
+    } catch {
+      l = console;
+    }
+  }
+  const emit = (level, fallback, m) => {
+    const fn = l?.[level];
+    if (typeof fn === 'function') return fn.call(l, m);
+    return fallback(m);
+  };
   return {
-    info: (m) => l.info?.(m) ?? console.log(m),
-    warn: (m) => l.warn?.(m) ?? console.warn(m),
-    error: (m) => l.error?.(m) ?? console.error(m),
-    debug: (m) => l.debug?.(m),
+    info: (m) => emit('info', console.log, m),
+    warn: (m) => emit('warn', console.warn, m),
+    error: (m) => emit('error', console.error, m),
+    debug: (m) => emit('debug', () => {}, m),
   };
 }
 
@@ -203,32 +237,223 @@ export function resolveSdk(qqbotDir) {
 // ────────────────────────── guard 中间件 ──────────────────────────
 
 /**
- * 真正的门禁逻辑。挂在中间件链头部，只做一件事：
- * 命中关键词且正文里没有 `<@appId>` 时，前置标记，让下游 mentionGate 认账。
+ * QQ 表情 id → emoji。与 `qqbot-nodejs` 的 `content-sanitizer` 用的同一张表：
+ * 那张表只在**老格式** `[<face,id=N/>]` 分支里用到，新格式分支只看 `<faceType>` 里的
+ * `ext.text`，于是 `ext` 为空（QQ 只下发 `{"text":""}`）时就退化成「未知表情」。
+ * 注意：新格式的 `faceId` 与本表的 id 是否同一命名空间，上游没有任何文档或代码证据，
+ * 这里按同一套编号猜——猜错只是 emoji 不对，不会丢信息（正文里的 ext 本身就没内容）。
  */
-export function createGuard(config = DEFAULT_CONFIG, logger = console) {
+const FACE_EMOJI = {
+  0: '😊', 1: '😣', 2: '😍', 4: '😎', 5: '😭', 6: '😳', 7: '🤐', 8: '😴',
+  9: '😢', 10: '😰', 11: '😡', 12: '🤗', 13: '⭐', 14: '🌟', 15: '🌙',
+  16: '👍', 18: '✊', 21: '😊', 23: '😢', 25: '🤔', 26: '😱', 27: '😅',
+  28: '😁', 29: '🤮', 30: '💪', 32: '🎉', 33: '😤', 34: '😏', 35: '🥺',
+  49: '🐷', 53: '🎂', 60: '☕', 63: '🌹', 66: '❤️', 74: '🌞', 75: '🌛',
+  76: '👏', 78: '🤝', 79: '✌️', 85: '🎅', 89: '🍉', 96: '😓', 97: '😲',
+  100: '😂', 101: '😊', 104: '😭', 106: '😱', 109: '😘', 111: '🥰',
+};
+
+/** `<faceType=6,faceId="0",ext="eyJ0ZXh0IjoiIn0=">` */
+const FACE_TAG_NEW = /<faceType=\d+,faceId="([^"]*)",ext="([^"]*)">/g;
+/** 老格式 `[<face,id=6/>]`；上游 sanitizer 也会处理，这里先手换掉避免历史里留下标签 */
+const FACE_TAG_OLD = /\[<face,id=(\d+)\/?>]/g;
+
+/**
+ * 把表情标签换成可读文本。
+ *
+ * 优先用 `ext` 里 QQ 下发的表情名；没有名字就统一给 `[表情]`，
+ * 不按 `faceId` 猜 emoji（实测 faceId=0 配空文本 = 收藏表情包，猜出来的语义是错的）。
+ * 只做字符串替换，不抛异常（`ext` 是外部数据）。
+ *
+ * @param {string} text 原始正文
+ * @returns {string} 替换后的正文
+ */
+export function normalizeFaces(text) {
+  if (typeof text !== 'string' || text === '') return text;
+  return text
+    .replace(FACE_TAG_NEW, (match, _faceId, ext) => {
+      let name = '';
+      try {
+        const decoded = Buffer.from(ext ?? '', 'base64').toString('utf8');
+        const parsed = JSON.parse(decoded);
+        name = typeof parsed?.text === 'string' ? parsed.text.trim() : '';
+      } catch {
+        // ext 不是合法 base64/JSON：当作没有名字
+      }
+      if (name) return name;
+      // ext.text 为空：多半是用户收藏的表情包（本体在图片附件里），
+      // 实测 faceId=0 配空文本就是这种情况，按 faceId 猜 emoji 会给出错误语义，
+      // 所以这里只给一个中性的占位符。
+      return '[表情]';
+    })
+    .replace(FACE_TAG_OLD, (_match, id) => FACE_EMOJI[String(id)] ?? '[表情]');
+}
+
+const ATTACHMENT_LABEL = { image: '图片', voice: '语音', video: '视频', file: '文件' };
+
+/**
+ * 给历史条目拼一句附件摘要。
+ *
+ * `historyBuffer` 只把 `content` 落库（senderId/senderName/content/timestamp/messageId），
+ * 所以纯图片/纯文件的消息在历史里是一条空行。这里补成 `[图片「a.png」]`。
+ *
+ * @param {Array} attachments qqbot 解析后的附件数组
+ * @returns {string} 形如 ` [图片「a.png」、语音]`，无附件时返回空串
+ */
+/**
+ * 找附件真正落在磁盘上的位置。
+ *
+ * 上游 `attachment.js` 的落盘名是 `<原名去扩展>_<Date.now()>_<8位hex><ext>`，
+ * 后缀带时间戳和随机数，**写历史的时候算不出来**（而且下载本身就晚于历史落库），
+ * 所以只能事后按 `<原名>_*` 前缀去 media 目录里匹配，取 mtime 最新的那个。
+ *
+ * @param {string} mediaRoot 媒体目录（qqbot 的 MEDIA_ROOT，默认 ~/.dsh-qqbot/media）
+ * @param {string} filename QQ 下发的原始文件名
+ * @returns {string} POSIX 风格绝对路径；找不到返回空串
+ */
+function resolveMediaPath(mediaRoot, filename) {
+  if (!mediaRoot || typeof filename !== 'string' || filename === '') return '';
+  try {
+    // 与上游 attachment.js:45 sanitizeFilename 保持一致：只换文件系统非法字符 + NFC
+    const base = String(filename).replace(/\\/g, '/').split('/').pop() ?? '';
+    const safe = base.replace(/[<>:"|?*\x00-\x1f]/g, '_').trim().normalize('NFC') || 'attachment';
+    const dot = safe.lastIndexOf('.');
+    const stem = dot > 0 ? safe.slice(0, dot) : safe;
+    const ext = dot > 0 ? safe.slice(dot) : '';
+    const candidates = readdirSync(mediaRoot).filter(
+      (n) => n.startsWith(`${stem}_`) && n.endsWith(ext),
+    );
+    if (candidates.length === 0) return '';
+    let best = '';
+    let bestTime = -1;
+    for (const n of candidates) {
+      const stat = statSync(join(mediaRoot, n));
+      if (stat.mtimeMs > bestTime) {
+        bestTime = stat.mtimeMs;
+        best = n;
+      }
+    }
+    // inbound 注入的路径是 POSIX 风格（renderMediaLine），这里保持一致
+    return `${mediaRoot.replace(/\\/g, '/').replace(/\/$/, '')}/${best}`;
+  } catch {
+    // 目录不存在 / 没权限：不标路径即可，不影响摘要
+    return '';
+  }
+}
+
+/**
+ * 把附件列表压成一句摘要，给群历史用。
+ * @param {Array} attachments msg.attachments（或存下来的精简副本）
+ * @param {string} [mediaRoot] 给了就顺带标注本地路径
+ */
+export function summarizeAttachments(attachments, mediaRoot = '') {
+  if (!Array.isArray(attachments) || attachments.length === 0) return '';
+  const parts = [];
+  for (const att of attachments) {
+    const label = ATTACHMENT_LABEL[att?.type] ?? '附件';
+    const name = att?.filename ?? att?.voiceText ?? '';
+    if (!name) {
+      parts.push(label);
+      continue;
+    }
+    const raw = att?.localPath || resolveMediaPath(mediaRoot, att?.filename ?? '');
+    // 落盘路径统一成 POSIX，跟 inbound 注入的 `- Image:` 保持一致
+    const path = raw ? raw.replace(/\\/g, '/') : '';
+    parts.push(path ? `${label}「${name}」@${path}` : `${label}「${name}」`);
+  }
+  return parts.length > 0 ? ` [${parts.join('、')}]` : '';
+}
+
+/** 正则字面量转义：appId 是纯数字，但配置里可能塞奇怪东西，别让它变成正则元字符 */
+function escapeRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * 给消息补一条“自己 @ 了 bot”的 mention。
+ * mentionGate 认 `mentions[].is_you`，slashCommand 也认；historyBuffer 只存正文，所以这样最干净。
+ */
+function markMention(msg, extra = {}) {
+  const mentions = Array.isArray(msg.mentions) ? msg.mentions : [];
+  if (!mentions.some((m) => m?.is_you === true)) {
+    mentions.push({ is_you: true, ...extra });
+  }
+  msg.mentions = mentions;
+}
+
+/**
+ * 真正的门禁逻辑。挂在中间件链头部，做两件事：
+ * 1. 正文里的表情标签换成可读文本（历史与当前消息都受益）；
+ * 2. 群聊命中关键词时给 `msg.mentions` 补 `{ is_you: true }`，让下游 mentionGate
+ *    判成“被 @”，从而放行并拼上群历史。**绝不改 `msg.content`**（历史会被污染）。
+ */
+export function createGuard(
+  config = DEFAULT_CONFIG,
+  logger = console,
+  notes = new Map(),
+  mediaDownloader = null,
+) {
   const triggers = (config.triggers ?? []).filter((t) => typeof t === 'string' && t.length > 0);
   const ignoreCase = config.ignoreCase !== false;
+  const faces = config.faces !== false;
+  const historyAttachments = config.historyAttachments !== false;
 
   return async function qqbotGuard(ctx, next) {
     try {
       const msg = ctx?.message;
+      if (faces && typeof msg?.content === 'string') {
+        const normalized = normalizeFaces(msg.content);
+        if (normalized !== msg.content) msg.content = normalized;
+      }
+      if (historyAttachments && msg?.kind === 'group' && msg?.messageId) {
+        if (summarizeAttachments(msg.attachments)) {
+          if (notes.size > 200) notes.clear();
+          // 附件得在这里就落盘：qqbot 的 attachmentProcessor 排在 mentionGate 之后，
+          // 没触发关键词的群消息根本走不到那一步，历史里就只剩文件名、点不开。
+          let paths = new Map();
+          if (mediaDownloader) {
+            try {
+              paths = (await mediaDownloader(msg.attachments)) ?? new Map();
+            } catch (err) {
+              logger.warn?.(`[qqbot-guard] 附件预下载失败（已忽略）: ${err?.message ?? err}`);
+            }
+          }
+          notes.set(
+            msg.messageId,
+            msg.attachments.slice(0, 6).map((a) => ({
+              type: a?.type,
+              filename: a?.filename,
+              voiceText: a?.voiceText,
+              localPath: paths.get?.(a?.filename) ?? '',
+            })),
+          );
+        }
+      }
       // 只处理群聊；私聊本来就 alwaysAnswer
-      if (msg?.kind === 'group' && triggers.length > 0) {
-        const raw = typeof msg.content === 'string' ? msg.content : '';
+      if (msg?.kind === 'group') {
         const appId = ctx?.bot?.appId;
-        if (raw && appId) {
-          const tagged = raw.includes(`<@${appId}>`) || raw.includes(`<@!${appId}>`);
-          if (!tagged) {
+        let raw = typeof msg.content === 'string' ? msg.content : '';
+        // 真实 @bot：把 `<@appId>` 从正文挪进 mentions。
+        // historyBuffer 在门控之前记录 content，标记留在正文里会被拼进群历史。
+        if (appId) {
+          const selfTag = new RegExp(`<@!?${escapeRegExp(appId)}>\\s*`, 'g');
+          if (selfTag.test(raw)) {
+            markMention(msg, { is_you: true });
+            raw = raw.replace(selfTag, '').trim();
+            msg.content = raw;
+            logger.debug?.('[qqbot-guard] 已把 <@appId> 移进 mentions');
+          }
+        }
+        if (triggers.length > 0 && raw) {
+          const already = Array.isArray(msg.mentions) && msg.mentions.some((m) => m?.is_you === true);
+          if (!already) {
             const hay = ignoreCase ? raw.toLowerCase() : raw;
-            const hit = triggers.find((t) =>
-              hay.includes(ignoreCase ? t.toLowerCase() : t),
-            );
+            const hit = triggers.find((t) => hay.includes(ignoreCase ? t.toLowerCase() : t));
             if (hit) {
-              msg.content = `<@${appId}> ${raw}`;
+              markMention(msg, { is_you: true, guarded: true });
               ctx.state = ctx.state ?? {};
               ctx.state.qqbotGuard = { trigger: hit };
-              logger.debug?.(`[qqbot-guard] keyword "${hit}" → 标记为 @，放行`);
+              logger.debug?.(`[qqbot-guard] keyword "${hit}" → 伪造 mentions.is_you，放行`);
             }
           }
         }
@@ -238,6 +463,99 @@ export function createGuard(config = DEFAULT_CONFIG, logger = console) {
       logger.error?.(`[qqbot-guard] guard 异常（已忽略）: ${err?.message ?? err}`);
     }
     await next();
+  };
+}
+
+const STORE_PATCH_FLAG = Symbol.for('qqbot-guard.historyStore');
+
+/**
+ * 让群历史带上附件摘要。
+ *
+ * 做法：包装共享 `HistoryStore.append`，把 guard 在链头算好的附件摘要拼进 `content`
+ * 后再落库。只影响历史条目，不动 `ctx.message.content`（当前消息仍由 inbound 用
+ * `Image: /path` 正常渲染）。幂等：打过的 store 不会重复包装。
+ *
+ * @param {object} store history store 单例
+ * @param {Map<string, string>} notes messageId → 附件摘要
+ * @param {object} logger 日志
+ * @returns {boolean} 是否已安装（含“本来就有”）
+ */
+/**
+ * 包装共享 history store 的 `list()`：读出历史时给带附件的条目补一句摘要。
+ *
+ * 改 `list` 而不是 `append` 的原因：本地路径要等附件下载完才存在，
+ * 而 `downloadMediaAttachments()` 在中间件链之后才跑，落库那一刻根本拿不到路径。
+ *
+ * @param {object} store getHistoryStore() 返回的单例
+ * @param {Map<string, Array>} notes messageId → 附件数组
+ * @param {object} [logger]
+ * @param {{mediaRoot?: string}} [options] mediaRoot：媒体目录，用来把路径补回去
+ */
+export function patchHistoryStore(store, notes, logger = console, options = {}) {
+  if (!store || typeof store.list !== 'function') return false;
+  if (store[STORE_PATCH_FLAG]) {
+    const state = store[STORE_PATCH_FLAG];
+    state.notes = notes;
+    if (options.mediaRoot) state.mediaRoot = options.mediaRoot;
+    return true;
+  }
+  const baseList = store.list.bind(store);
+  const state = { notes, mediaRoot: options.mediaRoot ?? '' };
+  const patched = function list(key, limit) {
+    const entries = baseList(key, limit) ?? [];
+    if (!state.notes || state.notes.size === 0) return entries;
+    return entries.map((entry) => {
+      try {
+        const attachments = state.notes.get(entry?.messageId);
+        if (!attachments) return entry;
+        const content = typeof entry.content === 'string' ? entry.content : '';
+        // 已经带过附件标注的条目不再重复追加
+        if (content.includes('[图片「') || content.includes('[附件「')) return entry;
+        const suffix = summarizeAttachments(attachments, state.mediaRoot);
+        return suffix ? { ...entry, content: `${content}${suffix}` } : entry;
+      } catch (err) {
+        logger.warn?.(`[qqbot-guard] 历史附件标注失败（已忽略）: ${err?.message ?? err}`);
+        return entry;
+      }
+    });
+  };
+  patched[STORE_PATCH_FLAG] = state;
+  store.list = patched;
+  store[STORE_PATCH_FLAG] = state;
+  return true;
+}
+
+/**
+ * 造一个“把附件下到本地”的函数，复用 qqbot 自己的下载器（落盘规则、体积上限都一致）。
+ *
+ * 为什么要预下载：qqbot 的 `attachmentProcessor` 是链上第 13 层，排在 mentionGate（第 5 层）
+ * 后面；群里没触发关键词的消息被门控拦下，压根走不到下载那一步，于是历史里只有文件名。
+ *
+ * @param {string} qqbotDir dsh-qqbot 包目录
+ * @param {object} cfg 插件配置
+ * @param {object} log logger
+ * @returns {((attachments: Array) => Promise<Map<string, string>>) | null}
+ */
+function makeMediaDownloader(qqbotDir, cfg, log) {
+  if (cfg.historyMedia === false) return null;
+  let impl = null;
+  return async function downloadAttachments(attachments) {
+    if (!Array.isArray(attachments) || attachments.length === 0) return new Map();
+    if (!impl) {
+      try {
+        const mod = await import(
+          pathToFileURL(join(qqbotDir, 'dist', 'transport', 'attachment.js')).href
+        );
+        impl = typeof mod.downloadMediaAttachments === 'function' ? mod.downloadMediaAttachments : null;
+      } catch (err) {
+        log.warn?.(`[qqbot-guard] 找不到 qqbot 的下载器，历史附件不落盘: ${err?.message ?? err}`);
+        impl = null;
+      }
+      if (!impl) return new Map();
+    }
+    const media = { enabled: true, maxMB: cfg.historyMediaMaxMB ?? 20 };
+    const files = await impl(attachments, media, log);
+    return new Map((files ?? []).map((f) => [f.filename, f.localPath]));
   };
 }
 
@@ -294,6 +612,11 @@ export async function apply(ctx, config) {
   const log = pickLogger(ctx);
   const cfg = mergeConfig(config, log);
 
+  if (cfg.enabled === false) {
+    log.info('[qqbot-guard] enabled=false，跳过（qqbot 行为保持原样）');
+    return;
+  }
+
   const qqbot = findQqbotPackage(cfg, log);
   if (!qqbot) return;
 
@@ -331,11 +654,37 @@ export async function apply(ctx, config) {
     }
   }
 
-  const guard = createGuard(cfg, log);
+  const notes = new Map();
+  const mediaDownloader = makeMediaDownloader(qqbot.dir, cfg, log);
+  const guard = createGuard(cfg, log, notes, mediaDownloader);
   const result = installGuard(sdk.QQBot, guard, log);
   if (!result.installed) {
     log.error(`[qqbot-guard] 补丁未安装：${result.reason}`);
     return;
+  }
+
+  let historyPatched = false;
+  let mediaRoot = '';
+  if (cfg.historyAttachments !== false) {
+    try {
+      const storeMod = await import(
+        pathToFileURL(join(qqbot.dir, 'dist', 'features', 'history-store.js')).href
+      );
+      // 附件落盘的目录：上游从 media-cleaner 导出 MEDIA_ROOT（~/.dsh-qqbot/media），
+      // 拿不到就按同一个默认值兜底（路径标注是锦上添花，失败不影响摘要）。
+      try {
+        const mediaMod = await import(
+          pathToFileURL(join(qqbot.dir, 'dist', 'media', 'media-cleaner.js')).href
+        );
+        mediaRoot = typeof mediaMod.MEDIA_ROOT === 'string' ? mediaMod.MEDIA_ROOT : '';
+      } catch {
+        mediaRoot = join(homedir(), '.dsh-qqbot', 'media');
+      }
+      historyPatched = patchHistoryStore(storeMod.getHistoryStore?.(), notes, log, { mediaRoot });
+      if (!historyPatched) log.warn('[qqbot-guard] 没找到 history store，历史附件摘要未启用');
+    } catch (err) {
+      log.warn(`[qqbot-guard] 历史附件摘要未启用: ${err?.message ?? err}`);
+    }
   }
 
   if (cfg.verbose) {
@@ -343,7 +692,8 @@ export async function apply(ctx, config) {
     log.info(
       `[qqbot-guard] 就绪：qqbot=${qqbot.pkg?.version ?? '?'} sdk=${sdkInfo.version ?? '?'} ` +
         `triggers=${JSON.stringify(cfg.triggers)} 配置源=${existsSync(cfgFile ?? '') ? cfgFile : 'cordis/默认'} ` +
-        `注入方式=lazy-unshift（与加载顺序无关）`,
+        `表情=${cfg.faces !== false ? '开' : '关'} 历史附件=${historyPatched ? '开' : '关'} ` +
+        `注入方式=lazy-unshift + 伪造 mentions（与加载顺序无关）`,
     );
   }
 
