@@ -408,7 +408,7 @@ public final class DshService extends Service {
      */
     private void writeIfChanged(File target, String asset) {
         try (java.io.InputStream in = getAssets().open(asset)) {
-            byte[] bytes = in.readAllBytes();
+            byte[] bytes = readFully(in);
             if (target.isFile() && target.length() == bytes.length
                     && java.util.Arrays.equals(java.nio.file.Files.readAllBytes(target.toPath()), bytes)) {
                 return;
@@ -417,6 +417,24 @@ public final class DshService extends Service {
         } catch (IOException error) {
             Log.w(TAG, "cannot publish " + target, error);
         }
+    }
+
+    /**
+     * Read a stream to the end without {@code InputStream.readAllBytes}, which older ART builds on
+     * this device do not provide.
+     *
+     * @param in stream to drain
+     * @return the stream contents
+     * @throws IOException when reading fails
+     */
+    private static byte[] readFully(java.io.InputStream in) throws IOException {
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        byte[] buffer = new byte[8192];
+        int read;
+        while ((read = in.read(buffer)) != -1) {
+            out.write(buffer, 0, read);
+        }
+        return out.toByteArray();
     }
 
     private void createChannel() {
