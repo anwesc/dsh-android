@@ -27,9 +27,16 @@ public final class ApkProvider extends ContentProvider {
         if (getContext() == null || uri.getLastPathSegment() == null) {
             throw new FileNotFoundException("no path");
         }
-        File apk = new File(getContext().getCacheDir(), uri.getLastPathSegment());
+        String name = uri.getLastPathSegment();
+        File apk = new File(getContext().getCacheDir(), name);
         if (!apk.isFile()) {
-            throw new FileNotFoundException(apk.getAbsolutePath());
+            apk = new File("/storage/emulated/0/DSH/work", name);
+        }
+        if (!apk.isFile()) {
+            apk = new File("/storage/emulated/0/DSH/updates", name);
+        }
+        if (!apk.isFile()) {
+            throw new FileNotFoundException(name);
         }
         return ParcelFileDescriptor.open(apk, ParcelFileDescriptor.MODE_READ_ONLY);
     }

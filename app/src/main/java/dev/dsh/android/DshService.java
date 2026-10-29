@@ -41,6 +41,13 @@ public final class DshService extends Service {
     static final String ACTION_RELOAD = "dev.dsh.android.action.RELOAD";
     /** Broadcast action asking the activity to check for an app update. */
     static final String ACTION_CHECK_UPDATE = "dev.dsh.android.action.CHECK_UPDATE";
+    /** Broadcast action telling the activity a newer version is available. */
+    static final String ACTION_UPDATE_AVAILABLE = "dev.dsh.android.action.UPDATE_AVAILABLE";
+    /** Broadcast action asking the activity to install the already downloaded APK. */
+    static final String ACTION_INSTALL_READY = "dev.dsh.android.action.INSTALL_READY";
+    /** Service action: download an update in the background. */
+    static final String ACTION_DOWNLOAD = "dev.dsh.android.action.DOWNLOAD";
+    static final String EXTRA_VERSION = "version";
     /** Broadcast action telling the activity that a failed boot can be rolled back. */
     static final String ACTION_RESTORE_PROMPT = "dev.dsh.android.action.RESTORE_PROMPT";
     /** Service action that performs the rollback the user confirmed. */
@@ -58,7 +65,7 @@ public final class DshService extends Service {
     static final String EXTRA_ERROR = "error";
 
     private static final String TAG = "DshService";
-    private static final String CHANNEL_ID = "dsh-runtime";
+    static final String CHANNEL_ID = "dsh-runtime";
     private static final int NOTIFICATION_ID = 0x4453;
     private static final Pattern URL_PATTERN = Pattern.compile("dsh web:\\s+(http\\S+)");
 
@@ -89,6 +96,11 @@ public final class DshService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && ACTION_DOWNLOAD.equals(intent.getAction())) {
+            startForeground(NOTIFICATION_ID, buildNotification("正在准备下载更新…"));
+            startDownload(intent.getStringExtra(EXTRA_URL), intent.getStringExtra(EXTRA_VERSION));
+            return START_STICKY;
+        }
         if (intent != null && ACTION_DO_RESTART.equals(intent.getAction())) {
             startForeground(NOTIFICATION_ID, buildNotification("正在重启服务…"));
             restartHarness();
@@ -208,6 +220,10 @@ public final class DshService extends Service {
         builder.environment().put("LD_LIBRARY_PATH", lib.getAbsolutePath());
         builder.environment().put("PROOT_LOADER", new File(runtime, "libexec/proot/loader").getAbsolutePath());
         builder.environment().put("PROOT_TMP_DIR", getCacheDir().getAbsolutePath());
+        // The container itself ships UTC; follow the phone so timestamps and schedules match.
+        String zone = java.util.TimeZone.getDefault().getID();
+        builder.environment().put("TZ", zone);
+        applyTimezone(runtime, zone);
 
         broadcast(ACTION_PROGRESS, EXTRA_PROGRESS, "正在启动服务…");
         try {
@@ -314,17 +330,43 @@ public final class DshService extends Service {
         BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
         String requestLine = reader.readLine();
         String body;
-        if (requestLine != null && requestLine.startsWith("GET /update/auto")) {
+        if (requestLine != null
+                && (requestLine.startsWith("GET /backups") || requestLine.startsWith("POST /backups"))) {
+            StringBuilder slots = new StringBuilder();
+            if (safetyNet != null) {
+                for (String slot : safetyNet.manualSlots()) {
+                    if (slots.length() > 0) {
+                        slots.append(",");
+                    }
+                    slots.append("\"").append(slot).append("\"");
+                }
+            }
+            body = "{\"slots\":[" + slots + "],\"last-good\":"
+                    + (safetyNet != null && safetyNet.hasGood()) + "}";
+        } else if (requestLine != null && requestLine.startsWith("GET /update/auto")) {
             body = "{\"enabled\":" + autoUpdateEnabled() + "}";
         } else if (requestLine != null && requestLine.startsWith("POST /update/auto")) {
             boolean enabled = !requestLine.contains("enabled=false");
             setAutoUpdate(enabled);
             body = "{\"enabled\":" + enabled + "}";
+        } else if (requestLine != null && requestLine.startsWith("POST /install")) {
+            File apk = UpdateChecker.cachedApk(this);
+            if (apk == null && sharedDirs != null) {
+                // Fallback: an APK dropped into the shared workspace (adb push / file manager).
+                apk = UpdateChecker.validApk(this, new File(sharedDirs.work, "update.apk"));
+            }
+            if (apk != null) {
+                broadcast(ACTION_INSTALL_READY, EXTRA_PROGRESS, apk.getAbsolutePath());
+                body = "{\"status\":\"installing\",\"size\":" + apk.length() + "}";
+            } else {
+                body = "{\"status\":\"no-file\"}";
+            }
         } else if (requestLine != null && requestLine.startsWith("POST /update")) {
             body = updateStatus();
         } else if (requestLine != null && requestLine.startsWith("POST /restore")) {
-            String from = safetyNet == null ? "无" : safetyNet.describeGood();
-            boolean restored = safetyNet != null && safetyNet.restore(runtimeDir);
+            String slot = queryParam(requestLine, "slot");
+            String from = slot == null ? (safetyNet == null ? "无" : safetyNet.describeGood()) : slot;
+            boolean restored = safetyNet != null && safetyNet.restoreSlot(runtimeDir, slot);
             body = "{\"status\":\"" + (restored ? "restored" : "no-backup")
                     + "\",\"from\":\"" + from.replace("\"", "") + "\"}";
             if (restored) {
@@ -332,18 +374,19 @@ public final class DshService extends Service {
             }
 
         } else if (requestLine != null && requestLine.startsWith("POST /backup")) {
-            boolean ok = false;
+            String slot = null;
             String where = "";
             if (safetyNet != null && runtimeDir != null) {
-                safetyNet.markGood(runtimeDir);
-                ok = safetyNet.hasGood();
-                where = safetyNet.describeGood();
-                UserData data = sharedDirs;
-                if (ok && data != null && safetyNet.mirrorTo(data.backup) > 0) {
-                    where = where + " / " + data.backup.getAbsolutePath();
+                slot = safetyNet.createManual(runtimeDir);
+                if (slot != null) {
+                    File mirror = mirrorDir(slot);
+                    if (mirror != null && safetyNet.mirrorSlot(slot, mirror) > 0) {
+                        where = mirror.getAbsolutePath();
+                    }
                 }
             }
-            body = "{\"status\":\"" + (ok ? "backed-up" : "failed")
+            body = "{\"status\":\"" + (slot != null ? "backed-up" : "failed")
+                    + "\",\"slot\":\"" + (slot == null ? "" : slot)
                     + "\",\"at\":\"" + where.replace("\"", "") + "\"}";
         } else if (requestLine != null && requestLine.startsWith("POST /export")) {
             publishHome(null);
@@ -431,6 +474,29 @@ public final class DshService extends Service {
             }
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * Point the container's /etc/localtime and /etc/timezone at the phone's zone.
+     *
+     * @param runtime unpacked runtime directory
+     * @param zone IANA zone id from the device
+     */
+    private void applyTimezone(File runtime, String zone) {
+        File rootfs = new File(runtime, "rootfs");
+        File zoneInfo = new File(rootfs, "usr/share/zoneinfo/" + zone);
+        File localtime = new File(rootfs, "etc/localtime");
+        try {
+            if (zoneInfo.isFile()) {
+                java.nio.file.Files.deleteIfExists(localtime.toPath());
+                java.nio.file.Files.createSymbolicLink(localtime.toPath(),
+                        java.nio.file.Paths.get("/usr/share/zoneinfo/" + zone));
+            }
+            java.nio.file.Files.write(new File(rootfs, "etc/timezone").toPath(),
+                    (zone + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (IOException error) {
+            Log.w(TAG, "cannot apply timezone " + zone, error);
         }
     }
 
@@ -531,6 +597,85 @@ public final class DshService extends Service {
         return out.toByteArray();
     }
 
+    /**
+     * Directory for mirrored manual snapshots under shared storage.
+     *
+     * @param slot snapshot name
+     * @return target directory, or null when shared storage is unavailable
+     */
+    private File mirrorDir(String slot) {
+        UserData data = sharedDirs;
+        if (data == null || data.backup.getParentFile() == null) {
+            return null;
+        }
+        return new File(new File(data.backup.getParentFile(), "backups"), slot);
+    }
+
+    /**
+     * Read a query parameter from the request line.
+     *
+     * @param requestLine raw HTTP request line
+     * @param name parameter name
+     * @return decoded value, or null when absent
+     */
+    private String queryParam(String requestLine, String name) {
+        int at = requestLine.indexOf(name + "=");
+        if (at < 0) {
+            return null;
+        }
+        int start = at + name.length() + 1;
+        int end = requestLine.indexOf(' ', start);
+        String raw = end < 0 ? requestLine.substring(start) : requestLine.substring(start, end);
+        return java.net.URLDecoder.decode(raw, java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Download the update in the background and report through the ongoing notification, so the
+     * activity can be closed while 350 MB comes down.
+     *
+     * @param url APK download URL
+     * @param version release version, for messages
+     */
+    private void startDownload(String url, String version) {
+        Thread thread = new Thread(() -> {
+            android.app.NotificationManager manager =
+                    (android.app.NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            try {
+                UpdateChecker.Release release = new UpdateChecker.Release(version, url);
+                java.io.File apk = UpdateChecker.download(this, release, (written, total) -> {
+                    int percent = total > 0 ? (int) (written * 100 / total) : -1;
+                    if (manager != null) {
+                        android.app.Notification note = new Notification.Builder(this, CHANNEL_ID)
+                                .setContentTitle("正在下载更新 v" + version)
+                                .setContentText(percent + "% · " + (written / 1048576) + "/"
+                                        + (total > 0 ? total / 1048576 : 0) + " MB")
+                                .setSmallIcon(android.R.drawable.stat_sys_download)
+                                .setProgress(100, Math.max(percent, 0), percent < 0)
+                                .setOngoing(true)
+                                .setOnlyAlertOnce(true)
+                                .build();
+                        manager.notify(NOTIFICATION_ID + 1, note);
+                    }
+                    return true;
+                });
+                if (manager != null) {
+                    manager.cancel(NOTIFICATION_ID + 1);
+                }
+                if (apk != null) {
+                    broadcast(ACTION_INSTALL_READY, EXTRA_PROGRESS, apk.getAbsolutePath());
+                }
+            } catch (IOException error) {
+                Log.w(TAG, "download failed", error);
+                if (manager != null) {
+                    manager.cancel(NOTIFICATION_ID + 1);
+                }
+                broadcast(ACTION_FAILED, EXTRA_ERROR, "更新下载失败：网络异常");
+            }
+        }, "dsh-download");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
     /** Refresh the visible copy of the known-good snapshot. */
     private void mirrorBackup() {
         UserData data = sharedDirs;
@@ -557,7 +702,12 @@ public final class DshService extends Service {
             UpdateChecker.Release release = UpdateChecker.latest();
             String current = UpdateChecker.currentVersion(this);
             if (release != null && UpdateChecker.isNewer(release.version, current)) {
-                broadcast(ACTION_CHECK_UPDATE, EXTRA_PROGRESS, "");
+                // Already downloaded? Offer the cached APK instead of fetching 350 MB again.
+                if (UpdateChecker.cachedApk(this) != null) {
+                    broadcast(ACTION_UPDATE_AVAILABLE, EXTRA_PROGRESS, release.version);
+                    return "{\"status\":\"cached\",\"version\":\"" + release.version + "\"}";
+                }
+                broadcast(ACTION_UPDATE_AVAILABLE, EXTRA_PROGRESS, release.version);
                 return "{\"status\":\"update\",\"version\":\"" + release.version + "\"}";
             }
             return "{\"status\":\"latest\",\"version\":\"" + current + "\"}";

@@ -20,9 +20,10 @@
 
         <activity
             android:name=".MainActivity"
-            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
             android:exported="true"
-            android:theme="@android:style/Theme.Material.NoActionBar">
+            android:theme="@style/AppTheme">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -42,6 +43,10 @@
 
         <receiver
             android:name=".PanelReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".InstallReceiver"
             android:exported="false" />
 
         <provider

@@ -55,6 +55,11 @@ public final class MainActivity extends Activity {
         public void onReceive(Context context, Intent intent) {
             String action = intent.getAction();
             if (DshService.ACTION_READY.equals(action)) {
+                // Check only after the harness is serving: a failure page plus an update prompt is
+                // confusing, and repeated recreation produced duplicate prompts.
+                if (getSharedPreferences("dsh", MODE_PRIVATE).getBoolean("auto_update", true)) {
+                    autoCheckOnce();
+                }
                 String url = intent.getStringExtra(DshService.EXTRA_URL);
                 if (url != null && webView != null) {
                     if (statusView != null) {
@@ -64,6 +69,13 @@ public final class MainActivity extends Activity {
                 }
             } else if (DshService.ACTION_FAILED.equals(action)) {
                 showStatus("启动失败：" + intent.getStringExtra(DshService.EXTRA_ERROR));
+            } else if (DshService.ACTION_INSTALL_READY.equals(action)) {
+                String path = intent.getStringExtra(DshService.EXTRA_PROGRESS);
+                Dialogs.choice(MainActivity.this, "下载完成", "安装包已下载完成，是否立即安装？",
+                        "立即安装", () -> installDownloaded(path), "稍后");
+            } else if (DshService.ACTION_UPDATE_AVAILABLE.equals(action)) {
+                // Manual path (panel or /update): always prompt, even if it was shown before.
+                checkForUpdates(true);
             } else if (DshService.ACTION_CHECK_UPDATE.equals(action)) {
                 checkForUpdates();
             } else if (DshService.ACTION_RESTORE_PROMPT.equals(action)) {
@@ -83,7 +95,10 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        // A dark app theme makes WebView report prefers-color-scheme: dark regardless of the phone
+        // setting, so the harness never follows the system. DayNight tracks the device instead.
         super.onCreate(savedInstanceState);
+        handleInstallResult(getIntent());
         WebView.setWebContentsDebuggingEnabled(true);
         webViewBridge = new Bridge();
         mobileCss = readAsset("mobile.css");
@@ -112,6 +127,7 @@ public final class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 injectMobileCss(view);
+                injectThemeProbe(view);
             }
 
             @Override
@@ -199,6 +215,10 @@ public final class MainActivity extends Activity {
 
         if (DshService.currentUrl != null) {
             webView.loadUrl(DshService.currentUrl);
+            // Warm start: the service already served its URL, so no READY broadcast is coming.
+            if (getSharedPreferences("dsh", MODE_PRIVATE).getBoolean("auto_update", true)) {
+                autoCheckOnce();
+            }
         }
 
         IntentFilter filter = new IntentFilter();
@@ -207,6 +227,8 @@ public final class MainActivity extends Activity {
         filter.addAction(DshService.ACTION_PROGRESS);
         filter.addAction(DshService.ACTION_RELOAD);
         filter.addAction(DshService.ACTION_CHECK_UPDATE);
+        filter.addAction(DshService.ACTION_UPDATE_AVAILABLE);
+        filter.addAction(DshService.ACTION_INSTALL_READY);
         filter.addAction(DshService.ACTION_RESTORE_PROMPT);
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
@@ -216,9 +238,6 @@ public final class MainActivity extends Activity {
         receiverRegistered = true;
 
         startRuntime();
-        if (getSharedPreferences("dsh", MODE_PRIVATE).getBoolean("auto_update", true)) {
-            checkForUpdates();
-        }
         if (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
                 != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{
@@ -249,6 +268,26 @@ public final class MainActivity extends Activity {
      *
      * @param view the WebView whose document just finished loading
      */
+    /**
+     * Tell the app whether the page currently renders light or dark, so dialogs follow the harness.
+     *
+     * @param view page that just finished loading
+     */
+    private void injectThemeProbe(WebView view) {
+        String js = "(function(){"
+                + "function send(){try{"
+                + "var bg=getComputedStyle(document.body).backgroundColor||'';"
+                + "var m=bg.match(/rgba?\\((\\d+)[,\\s]+(\\d+)[,\\s]+(\\d+)/);"
+                + "if(!m){return;}"
+                + "var l=(0.2126*(+m[1])+0.7152*(+m[2])+0.0722*(+m[3]))/255;"
+                + "if(window.DSHAndroid&&window.DSHAndroid.theme){window.DSHAndroid.theme(l>0.55?'light':'dark');}"
+                + "}catch(e){}}"
+                + "send();"
+                + "if(!window.__dshThemeWatch){window.__dshThemeWatch=setInterval(send,4000);}"
+                + "})();";
+        view.evaluateJavascript(js, null);
+    }
+
     private void injectMobileCss(WebView view) {
         if (mobileCss == null || mobileCss.isEmpty()) {
             return;
@@ -294,6 +333,189 @@ public final class MainActivity extends Activity {
         }
     }
 
+    /** Timestamp of the last automatic check, so activity recreation cannot repeat it. */
+    private static long lastAutoCheckAt;
+    /** True while an update prompt is on screen, so a second check cannot stack another. */
+    private boolean updatePromptVisible;
+
+    /** Run the startup check at most once per minute, even if the activity is recreated. */
+    private void autoCheckOnce() {
+        long now = System.currentTimeMillis();
+        if (now - lastAutoCheckAt < 60_000L) {
+            Log.i(TAG, "auto update check skipped (already ran " + (now - lastAutoCheckAt) + "ms ago)");
+            return;
+        }
+        lastAutoCheckAt = now;
+        checkForUpdates();
+    }
+
+    /** Look for a newer published APK and let the user decide when to install it. */
+    private void checkForUpdates() {
+        checkForUpdates(false);
+    }
+
+    /**
+     * Look for a newer published APK.
+     *
+     * @param manual true when the user asked from the panel; manual checks always prompt
+     */
+    private void checkForUpdates(boolean manual) {
+        Thread thread = new Thread(() -> {
+            try {
+                UpdateChecker.Release release = UpdateChecker.latest();
+                String current = UpdateChecker.currentVersion(this);
+                if (release == null || !UpdateChecker.isNewer(release.version, current)) {
+                    Log.i(TAG, "app up to date (" + current + ")");
+                    return;
+                }
+                java.io.File cached = UpdateChecker.cachedApk(this);
+                boolean alreadyPrompted = release.version.equals(getSharedPreferences("dsh", MODE_PRIVATE)
+                        .getString("prompted_update", ""));
+                if (!manual && alreadyPrompted) {
+                    Log.i(TAG, "update prompt already shown for " + release.version);
+                    return;
+                }
+                runOnUiThread(() -> {
+                    getSharedPreferences("dsh", MODE_PRIVATE).edit()
+                            .putString("prompted_update", release.version).apply();
+                    if (cached != null) {
+                        showCachedPrompt(release.version, cached);
+                    } else {
+                        promptUpdate(release);
+                    }
+                });
+            } catch (java.io.IOException error) {
+                Log.w(TAG, "update check failed", error);
+            }
+        }, "dsh-update");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    /**
+     * Ask whether to install now or later; nothing is downloaded until the user agrees.
+     *
+     * @param release newer release found on GitHub
+     */
+    private void promptUpdate(UpdateChecker.Release release) {
+        if (isFinishing() || isDestroyed() || updatePromptVisible) {
+            return;
+        }
+        updatePromptVisible = true;
+        Dialogs.choice(this, "发现新版本 v" + release.version,
+                "可以现在下载并安装，也可以稍后再更新。",
+                "立即更新", () -> downloadUpdate(release), "稍后",
+                () -> updatePromptVisible = false);
+    }
+
+    /**
+     * Offer the already downloaded package.
+     *
+     * @param version release version
+     * @param apk cached, verified APK
+     */
+    private void showCachedPrompt(String version, java.io.File apk) {
+        if (isFinishing() || isDestroyed() || updatePromptVisible) {
+            return;
+        }
+        updatePromptVisible = true;
+        Dialogs.choice(this, "发现已下载的 v" + version,
+                "安装包已经在本地，直接安装即可。",
+                "立即安装", () -> UpdateChecker.install(this, apk), "稍后",
+                () -> updatePromptVisible = false);
+    }
+
+    /**
+     * React to a PackageInstaller result, launching the system confirmation when the system asks.
+     *
+     * @param intent intent carrying EXTRA_STATUS from the installer
+     */
+    private void handleInstallResult(android.content.Intent intent) {
+        int status = intent == null ? -1
+                : intent.getIntExtra(android.content.pm.PackageInstaller.EXTRA_STATUS, -1);
+        if (status < 0) {
+            return;
+        }
+        if (status == android.content.pm.PackageInstaller.STATUS_PENDING_USER_ACTION) {
+            android.content.Intent confirm = intent.getParcelableExtra(android.content.Intent.EXTRA_INTENT);
+            if (confirm != null) {
+                startActivity(confirm);
+            }
+            return;
+        }
+        String message = intent.getStringExtra(android.content.pm.PackageInstaller.EXTRA_STATUS_MESSAGE);
+        if (status == android.content.pm.PackageInstaller.STATUS_SUCCESS) {
+            Toast.makeText(this, "安装完成", Toast.LENGTH_LONG).show();
+        } else {
+            Toast.makeText(this, "安装未完成：" + (message == null ? "已取消" : message),
+                    Toast.LENGTH_LONG).show();
+        }
+    }
+
+    /**
+     * Install an APK handed over by the service, falling back to the cache.
+     *
+     * @param path absolute path from the service, or null
+     */
+    private void installDownloaded(String path) {
+        java.io.File apk = path == null ? null : new java.io.File(path);
+        if (apk == null || !apk.isFile()) {
+            apk = UpdateChecker.cachedApk(this);
+        }
+        if (apk != null) {
+            UpdateChecker.install(this, apk);
+        } else {
+            Toast.makeText(this, "没有可安装的更新包", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /**
+     * Mirror download progress into the notification shade.
+     *
+     * @param version release being downloaded
+     * @param percent completion percentage
+     * @param text detail line
+     */
+    private void notifyDownload(String version, int percent, String text) {
+        android.app.NotificationManager manager =
+                (android.app.NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        if (manager == null) {
+            return;
+        }
+        android.app.Notification notification = new android.app.Notification.Builder(this, DshService.CHANNEL_ID)
+                .setContentTitle("正在下载更新 v" + version)
+                .setContentText(text)
+                .setSmallIcon(android.R.drawable.stat_sys_download)
+                .setProgress(100, percent, false)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .build();
+        manager.notify(2, notification);
+    }
+
+    /** Remove the download notification. */
+    private void clearDownloadNotice() {
+        android.app.NotificationManager manager =
+                (android.app.NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        if (manager != null) {
+            manager.cancel(2);
+        }
+    }
+
+    /**
+     * Start the download inside the service so the app can be closed while it runs.
+     *
+     * @param release release to download
+     */
+    private void downloadUpdate(UpdateChecker.Release release) {
+        Intent intent = new Intent(this, DshService.class)
+                .setAction(DshService.ACTION_DOWNLOAD)
+                .putExtra(DshService.EXTRA_URL, release.apkUrl)
+                .putExtra(DshService.EXTRA_VERSION, release.version);
+        startForegroundService(intent);
+        Toast.makeText(this, "已开始后台下载，可在通知栏查看进度", Toast.LENGTH_SHORT).show();
+    }
+
     /**
      * Ask before rolling the profile back: the rollback discards whatever the agent edited.
      */
@@ -314,31 +536,6 @@ public final class MainActivity extends Activity {
                     .setNegativeButton("保持现状", null)
                     .show();
         });
-    }
-
-    /** Look for a newer published APK in the background and offer to install it. */
-    private void checkForUpdates() {
-        Thread thread = new Thread(() -> {
-            try {
-                UpdateChecker.Release release = UpdateChecker.latest();
-                String current = UpdateChecker.currentVersion(this);
-                if (release == null || !UpdateChecker.isNewer(release.version, current)) {
-                    Log.i(TAG, "app up to date (" + current + ")");
-                    return;
-                }
-                runOnUiThread(() -> Toast.makeText(this,
-                        "发现新版本 " + release.version + "，正在下载…", Toast.LENGTH_SHORT).show());
-                java.io.File apk = UpdateChecker.download(this, release);
-                runOnUiThread(() -> {
-                    Toast.makeText(this, "下载完成，开始安装", Toast.LENGTH_SHORT).show();
-                    UpdateChecker.install(this, apk);
-                });
-            } catch (java.io.IOException error) {
-                Log.w(TAG, "update check failed", error);
-            }
-        }, "dsh-update");
-        thread.setDaemon(true);
-        thread.start();
     }
 
     /**
@@ -430,6 +627,16 @@ public final class MainActivity extends Activity {
                 return;
             }
             runOnUiThread(() -> openExternally(Uri.parse(url)));
+        }
+
+        /**
+         * Report the page theme so the native sheets match it.
+         *
+         * @param mode "light" or "dark"
+         */
+        @JavascriptInterface
+        public void theme(String mode) {
+            Theme.set(mode);
         }
 
         /** Open the maintenance panel from the in-page button. */
