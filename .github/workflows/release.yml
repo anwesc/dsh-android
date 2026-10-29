@@ -80,8 +80,20 @@ jobs:
           cp app/build/outputs/apk/release/app-release.apk "dsh-${version}-release.apk"
           ls -l "dsh-${version}-release.apk"
 
+      - name: Prepare release notes
+        run: |
+          notes="release-notes/${GITHUB_REF_NAME}.md"
+          if [ -f "$notes" ]; then
+            cp "$notes" .release-body.md
+          else
+            {
+              echo "构建自 \`${GITHUB_REF_NAME}\`，未单独编写更新说明。"
+            } > .release-body.md
+          fi
+
       - name: Attach APK to the release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: .release-body.md
           files: dsh-*-release.apk
           fail_on_unmatched_files: true
