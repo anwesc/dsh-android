@@ -90,10 +90,12 @@ jobs:
               echo "构建自 \`${GITHUB_REF_NAME}\`，未单独编写更新说明。"
             } > .release-body.md
           fi
+          echo "RELEASE_NAME=DSH ${GITHUB_REF_NAME#v} (Android)" >> "$GITHUB_ENV"
 
       - name: Attach APK to the release
         uses: softprops/action-gh-release@v2
         with:
+          name: ${{ env.RELEASE_NAME }}
           body_path: .release-body.md
           files: dsh-*-release.apk
           fail_on_unmatched_files: true
