@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # rootfs.bin is not committed; a placeholder keeps the asset graph valid for
+      # compilation and lint, which never read the file.
+      - name: Placeholder runtime image
+        run: head -c 4096 /dev/urandom > app/src/main/assets/rootfs.bin
+
+      - name: Assemble debug
+        run: ./gradlew --no-daemon --console=plain assembleDebug
+
+      # NewApi is escalated to an error: it catches JDK methods the Android runtime lacks
+      # (InputStream.readAllBytes crashed on device before this gate existed).
+      - name: Lint
+        run: ./gradlew --no-daemon --console=plain lintDebug
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lint-report
+          path: app/build/reports/lint-results-debug.*
+          if-no-files-found: ignore

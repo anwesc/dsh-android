@@ -138,6 +138,13 @@ git tag v0.3.2 && git push --tags
 镜像更新时：把新镜像传到 `runtime-vN` Release，并同时改 `RuntimeInstaller.LAYOUT_VERSION`
 和 workflow 里的 `RUNTIME_TAG`/`RUNTIME_SHA256`。
 
+
+### 为什么用 lint 而不是模拟器冒烟
+
+运行时是 arm64 + proot 的完整 Linux 用户态，x86_64 模拟器跑不起来；GitHub 的 arm64 runner 没有嵌套虚拟化，起不了 Android 模拟器。
+真正能在 CI 里挡住这类问题的是 lint 的 NewApi 检查：它按 minSdk 校验每个调用的 API 级别，`InputStream.readAllBytes`（API 33）这种「编译过、真机崩」的问题会被直接判错。
+
+`.github/workflows/ci.yml` 在每次 push/PR 跑 `assembleDebug` + `lintDebug`；`release.yml` 在出包前也跑一次 `lintRelease`。真机验证仍需人工完成一次（安装 → 首次解压 → 页面可用）。
 ## 已知限制
 
 - **APK ~307 MB**，首次安装解压约 20 s，之后冷启动约 20 s（proot 下模块解析的 stat 开销）。

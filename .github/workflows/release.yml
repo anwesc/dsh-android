@@ -52,6 +52,9 @@ jobs:
             echo "keyPassword=$KEY_PASSWORD"
           } > keystore.properties
 
+      - name: Lint (NewApi is fatal)
+        run: ./gradlew --no-daemon --console=plain lintRelease
+
       - name: Build signed APK
         run: ./gradlew --no-daemon --console=plain assembleRelease
 

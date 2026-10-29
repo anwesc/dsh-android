@@ -61,6 +61,11 @@ android {
     lint {
         // targetSdk 28 is intentional: Android >= 29 forbids exec of app-private binaries.
         disable += "ExpiredTargetSdkVersion"
+        // Catch JDK APIs the Android runtime does not ship (e.g. InputStream.readAllBytes on
+        // API < 33). Compilation against the SDK does not prove runtime availability.
+        error += "NewApi"
+        abortOnError = true
+        checkReleaseBuilds = true
     }
 
     packaging {
