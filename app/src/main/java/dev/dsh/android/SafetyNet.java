@@ -31,6 +31,9 @@ final class SafetyNet {
     private static final String PENDING = "boot.pending";
     private static final String GOOD = "last-good";
     private static final String GOOD_META = "last-good.meta";
+    /** Manual snapshots kept on disk; older ones are pruned. */
+    private static final int KEEP_MANUAL = 5;
+    private static final String MANUAL_PREFIX = "manual-";
 
     private final File state;
 
@@ -76,6 +79,123 @@ final class SafetyNet {
             Files.deleteIfExists(new File(state, PENDING).toPath());
         } catch (IOException error) {
             Log.w(TAG, "cannot snapshot profile", error);
+        }
+    }
+
+    /**
+     * Take a manual snapshot before editing configuration. Manual snapshots are never overwritten
+     * by an automatic boot snapshot, so the pre-edit state stays recoverable.
+     *
+     * @param runtime unpacked runtime directory
+     * @return slot name, or null when the snapshot could not be written
+     */
+    String createManual(File runtime) {
+        String slot = MANUAL_PREFIX + new java.text.SimpleDateFormat("yyyyMMdd-HHmmss",
+                java.util.Locale.US).format(new java.util.Date());
+        try {
+            File target = new File(state, slot);
+            copyConfig(profileDir(runtime), target);
+            java.nio.file.Files.write(new File(target, "meta.txt").toPath(),
+                    String.valueOf(System.currentTimeMillis())
+                            .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            pruneManual();
+            return slot;
+        } catch (IOException error) {
+            Log.w(TAG, "cannot create manual snapshot", error);
+            return null;
+        }
+    }
+
+    /**
+     * List manual snapshots, newest first.
+     *
+     * @return slot names
+     */
+    java.util.List<String> manualSlots() {
+        java.util.List<String> slots = new java.util.ArrayList<>();
+        File[] children = state.listFiles();
+        if (children == null) {
+            return slots;
+        }
+        for (File child : children) {
+            if (child.isDirectory() && child.getName().startsWith(MANUAL_PREFIX)) {
+                slots.add(child.getName());
+            }
+        }
+        java.util.Collections.sort(slots);
+        java.util.Collections.reverse(slots);
+        return slots;
+    }
+
+    /**
+     * Restore a specific snapshot.
+     *
+     * @param runtime unpacked runtime directory
+     * @param slot snapshot directory name, or null for the automatic last-good
+     * @return true when the configuration was copied back
+     */
+    boolean restoreSlot(File runtime, String slot) {
+        if (slot == null || slot.isEmpty() || "last-good".equals(slot)) {
+            return restore(runtime);
+        }
+        File source = new File(state, slot);
+        if (!source.isDirectory()) {
+            return false;
+        }
+        try {
+            copyConfig(source, profileDir(runtime));
+            Log.i(TAG, "restored profile from " + slot);
+            return true;
+        } catch (IOException error) {
+            Log.w(TAG, "cannot restore " + slot, error);
+            return false;
+        }
+    }
+
+    /**
+     * Copy one snapshot into a visible directory.
+     *
+     * @param slot snapshot name
+     * @param destination target directory (created or reused)
+     * @return number of files copied, 0 when the snapshot is missing
+     */
+    int mirrorSlot(String slot, File destination) {
+        File source = new File(state, slot);
+        if (!source.isDirectory()) {
+            return 0;
+        }
+        try {
+            if (!destination.isDirectory() && !destination.mkdirs()) {
+                throw new IOException("cannot create " + destination);
+            }
+            File[] children = source.listFiles();
+            int copied = 0;
+            if (children != null) {
+                for (File child : children) {
+                    if ("meta.txt".equals(child.getName())) {
+                        continue;
+                    }
+                    java.nio.file.Files.copy(child.toPath(),
+                            new File(destination, child.getName()).toPath(),
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    copied++;
+                }
+            }
+            return copied;
+        } catch (IOException error) {
+            Log.w(TAG, "cannot mirror " + slot, error);
+            return 0;
+        }
+    }
+
+    private void pruneManual() {
+        java.util.List<String> slots = manualSlots();
+        for (int i = KEEP_MANUAL; i < slots.size(); i++) {
+            try {
+                deleteTree(new File(state, slots.get(i)));
+            } catch (IOException error) {
+                Log.w(TAG, "cannot prune " + slots.get(i), error);
+            }
         }
     }
 
