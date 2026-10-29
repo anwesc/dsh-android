@@ -29,10 +29,20 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".ControlActivity"
+            android:exported="true"
+            android:label="DSH 控制面板"
+            android:theme="@android:style/Theme.Material.Light.Dialog" />
+
         <service
             android:name=".DshService"
             android:exported="false"
             android:stopWithTask="false" />
+
+        <receiver
+            android:name=".PanelReceiver"
+            android:exported="false" />
 
         <provider
             android:name=".ApkProvider"
