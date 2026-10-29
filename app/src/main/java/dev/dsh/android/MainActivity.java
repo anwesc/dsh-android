@@ -58,6 +58,10 @@ public final class MainActivity extends Activity {
                 }
             } else if (DshService.ACTION_FAILED.equals(action)) {
                 showStatus("启动失败：" + intent.getStringExtra(DshService.EXTRA_ERROR));
+            } else if (DshService.ACTION_RELOAD.equals(action)) {
+                if (webView != null) {
+                    webView.reload();
+                }
             } else if (DshService.ACTION_PROGRESS.equals(action)) {
                 String progress = intent.getStringExtra(DshService.EXTRA_PROGRESS);
                 if (progress != null) {
@@ -152,6 +156,7 @@ public final class MainActivity extends Activity {
         filter.addAction(DshService.ACTION_READY);
         filter.addAction(DshService.ACTION_FAILED);
         filter.addAction(DshService.ACTION_PROGRESS);
+        filter.addAction(DshService.ACTION_RELOAD);
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
         } else {

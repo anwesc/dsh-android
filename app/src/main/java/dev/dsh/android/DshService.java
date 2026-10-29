@@ -11,6 +11,10 @@ import android.os.PowerManager;
 import android.util.Log;
 
 import java.io.BufferedReader;
+import java.io.OutputStream;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -33,6 +37,10 @@ public final class DshService extends Service {
     static final String ACTION_FAILED = "dev.dsh.android.action.FAILED";
     /** Broadcast action carrying boot progress text for the launch screen. */
     static final String ACTION_PROGRESS = "dev.dsh.android.action.PROGRESS";
+    /** Broadcast action asking the WebView to reload (after a plugin install). */
+    static final String ACTION_RELOAD = "dev.dsh.android.action.RELOAD";
+    /** Loopback control port for restart/reload requests from inside the container. */
+    private static final int CONTROL_PORT = 3081;
     /** Intent extra holding the progress line. */
     static final String EXTRA_PROGRESS = "progress";
     /** Intent extra and broadcast extra holding the URL or the failure text. */
@@ -51,6 +59,8 @@ public final class DshService extends Service {
     private Process process;
     private PowerManager.WakeLock wakeLock;
     private long bootStartedAt;
+    private volatile File runtimeDir;
+    private final Object serverLock = new Object();
 
     @Override
     public void onCreate() {
@@ -95,6 +105,8 @@ public final class DshService extends Service {
                         updateNotification(stage + " " + percent + "%"));
             }
             Log.i(TAG, "runtime ready in " + (System.currentTimeMillis() - started) + "ms");
+            runtimeDir = runtime;
+            startControlServer();
             startServer(runtime);
         } catch (Throwable error) {
             Log.e(TAG, "runtime boot failed", error);
@@ -109,7 +121,7 @@ public final class DshService extends Service {
      * @param runtime unpacked runtime directory
      * @throws IOException when the process cannot be started
      */
-    private void startServer(File runtime) throws IOException {
+    private synchronized void startServer(File runtime) throws IOException {
         File proot = new File(runtime, "bin/proot");
         File lib = new File(runtime, "lib");
         File rootfs = new File(runtime, "rootfs");
@@ -198,6 +210,75 @@ public final class DshService extends Service {
         currentUrl = null;
         broadcast(ACTION_FAILED, EXTRA_ERROR, "harness exited with " + status);
         stopSelf();
+    }
+
+    /**
+     * Serve POST /restart and POST /reload on loopback so the agent can apply plugin changes
+     * without the user reopening the app.
+     */
+    private void startControlServer() {
+        Thread thread = new Thread(() -> {
+            try (ServerSocket server = new ServerSocket(CONTROL_PORT, 8, InetAddress.getByName("127.0.0.1"))) {
+                Log.i(TAG, "control server on 127.0.0.1:" + CONTROL_PORT);
+                while (!server.isClosed()) {
+                    try (Socket socket = server.accept()) {
+                        handleControl(socket);
+                    } catch (IOException error) {
+                        Log.w(TAG, "control request failed", error);
+                    }
+                }
+            } catch (IOException error) {
+                Log.w(TAG, "control server unavailable", error);
+            }
+        }, "dsh-control");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    private void handleControl(Socket socket) throws IOException {
+        BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
+        String requestLine = reader.readLine();
+        String body;
+        if (requestLine != null && requestLine.startsWith("POST /restart")) {
+            restartHarness();
+            body = "{\"status\":\"restarting\"}";
+        } else if (requestLine != null && requestLine.startsWith("POST /reload")) {
+            broadcast(ACTION_RELOAD, EXTRA_PROGRESS, "");
+            body = "{\"status\":\"reloading\"}";
+        } else {
+            String url = currentUrl;
+            body = "{\"url\":\"" + (url == null ? "" : url) + "\"}";
+        }
+        byte[] payload = body.getBytes(StandardCharsets.UTF_8);
+        OutputStream out = socket.getOutputStream();
+        out.write(("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                + payload.length + "\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+        out.write(payload);
+        out.flush();
+    }
+
+    /** Stop the current harness process and start it again, publishing a fresh URL. */
+    private void restartHarness() {
+        synchronized (serverLock) {
+            File dir = runtimeDir;
+            if (dir == null) {
+                return;
+            }
+            if (process != null) {
+                process.destroy();
+                process = null;
+            }
+            currentUrl = null;
+            Thread thread = new Thread(() -> {
+                try {
+                    startServer(dir);
+                } catch (IOException error) {
+                    Log.e(TAG, "restart failed", error);
+                    broadcast(ACTION_FAILED, EXTRA_ERROR, String.valueOf(error.getMessage()));
+                }
+            }, "dsh-restart");
+            thread.start();
+        }
     }
 
     private void createChannel() {
