@@ -4,3 +4,12 @@
 *.so binary
 app/src/main/assets/runtime/proot binary
 app/src/main/assets/runtime/libexec/loader binary
+
+# Shell scripts must keep LF or the shebang / `then` lines break on Linux checkouts.
+*.sh text eol=lf
+
+# Bundled plugin + its generated asset copy are compared byte-for-byte by
+# scripts/sync-plugin-seed.sh --check; CRLF conversion would make them drift.
+plugins/qqbot-guard/* text eol=lf
+app/src/main/assets/plugin-seed/** text eol=lf
+
