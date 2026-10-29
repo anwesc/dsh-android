@@ -44,7 +44,12 @@ jobs:
             echo "::error::KEYSTORE_BASE64 secret is not configured"
             exit 1
           fi
-          printf '%s' "$KEYSTORE_BASE64" | base64 -d > dsh-release.jks
+          # Secrets copied from copy/paste tools often carry stray whitespace or quotes.
+          printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]"' | base64 -d > dsh-release.jks
+          if ! head -c 4 dsh-release.jks | od -An -tx1 | tr -d ' \n' | grep -qi 'feedfeed'; then
+            echo "::error::KEYSTORE_BASE64 did not decode to a JKS keystore (got $(wc -c < dsh-release.jks) bytes)"
+            exit 1
+          fi
           {
             echo "storeFile=dsh-release.jks"
             echo "storePassword=$KEYSTORE_PASSWORD"
