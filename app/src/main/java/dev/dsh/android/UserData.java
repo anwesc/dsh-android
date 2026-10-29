@@ -10,8 +10,8 @@ import java.io.File;
 import java.io.IOException;
 
 /**
- * Resolves the directories shared with the phone's file manager: the workspace and the home
- * exchange folder. The harness profile stays inside the unpacked image; {@link RuntimeInstaller}
+ * Resolves the directories shared with the phone's file manager: the workspace and the exported
+ * harness home. The harness profile stays inside the unpacked image; {@link RuntimeInstaller}
  * migrates it across image updates.
  */
 final class UserData {
@@ -20,13 +20,11 @@ final class UserData {
     private static final String SHARED_DIR = "DSH";
 
     final File work;
-    final File home;
     /** Mirror of the harness home (sessions, plugins, settings) for the file manager. */
     final File dsh;
 
-    private UserData(File work, File home, File dsh) {
+    private UserData(File work, File dsh) {
         this.work = work;
-        this.home = home;
         this.dsh = dsh;
     }
 
@@ -40,19 +38,15 @@ final class UserData {
     static UserData prepare(Context context) throws IOException {
         File shared = sharedRoot(context);
         File work;
-        File home;
         if (shared != null) {
             work = new File(shared, "work");
-            home = new File(shared, "home");
         } else {
             File root = new File(context.getFilesDir(), "userdata");
             work = new File(root, "work");
-            home = new File(root, "home");
         }
         ensure(work);
-        ensure(home);
         File dsh = new File(shared != null ? shared : new File(context.getFilesDir(), "userdata"), "dsh");
-        return new UserData(work, home, dsh);
+        return new UserData(work, dsh);
     }
 
     private static void ensure(File dir) throws IOException {

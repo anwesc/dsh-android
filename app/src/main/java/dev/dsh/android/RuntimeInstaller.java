@@ -97,11 +97,6 @@ final class RuntimeInstaller {
         report(progress, 3, "unpacking harness runtime");
         extractRootfs(context, rootfs, progress);
 
-        File homeDir = new File(staged, "rootfs/root/home");
-        if (!homeDir.isDirectory() && !homeDir.mkdirs()) {
-            throw new IOException("cannot create " + homeDir);
-        }
-
         report(progress, 97, "keeping your sessions");
         try {
             migrateProfile(runtime, staged);

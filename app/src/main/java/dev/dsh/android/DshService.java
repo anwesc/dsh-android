@@ -151,8 +151,6 @@ public final class DshService extends Service {
         UserData data = UserData.prepare(this);
         command.add("-b");
         command.add(data.work.getAbsolutePath() + ":/root/work");
-        command.add("-b");
-        command.add(data.home.getAbsolutePath() + ":/root/home");
         publishDocs(data);
         publishHome(data);
         command.add("-w");
