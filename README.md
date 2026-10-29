@@ -91,6 +91,25 @@ tar --hard-dereference -cf - -C <rootfs> . | gzip -1 > rootfs.bin
 
 debug 与 release 签名不同，两者不能互相覆盖：调试用 `assembleDebug`，分发用 `assembleRelease`。
 
+## 让助手重启服务
+
+装完插件后不必手动重启 App。服务在 `127.0.0.1:3081` 暴露控制端口（仅 loopback）：
+
+| 请求 | 作用 |
+|---|---|
+| `POST /reload` | 让 WebView 重新加载页面（token 不变，最轻） |
+| `POST /restart` | 重启 `dsh web`，新 token 自动推给页面 |
+| `GET /` | 返回当前 URL |
+
+助手在容器里直接执行即可（镜像自带 curl）：
+
+```bash
+curl -s -X POST http://127.0.0.1:3081/reload
+curl -s -X POST http://127.0.0.1:3081/restart
+```
+
+端口被占用时（例如旧进程残留），服务会自动改用 3082–3099 里的空闲端口，URL 也随之变化。
+
 ## 已知限制
 
 - **APK ~307 MB**，首次安装解压约 20 s，之后冷启动约 20 s（proot 下模块解析的 stat 开销）。

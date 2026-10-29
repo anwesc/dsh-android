@@ -61,6 +61,7 @@ public final class DshService extends Service {
     private long bootStartedAt;
     private volatile File runtimeDir;
     private final Object serverLock = new Object();
+    private volatile boolean restarting;
 
     @Override
     public void onCreate() {
@@ -109,6 +110,10 @@ public final class DshService extends Service {
             startControlServer();
             startServer(runtime);
         } catch (Throwable error) {
+            if (restarting) {
+                Log.i(TAG, "previous harness stopped for restart");
+                return;
+            }
             Log.e(TAG, "runtime boot failed", error);
             broadcast(ACTION_FAILED, EXTRA_ERROR, String.valueOf(error.getMessage()));
             updateNotification("启动失败");
@@ -121,7 +126,7 @@ public final class DshService extends Service {
      * @param runtime unpacked runtime directory
      * @throws IOException when the process cannot be started
      */
-    private synchronized void startServer(File runtime) throws IOException {
+    private void startServer(File runtime) throws IOException {
         File proot = new File(runtime, "bin/proot");
         File lib = new File(runtime, "lib");
         File rootfs = new File(runtime, "rootfs");
@@ -131,6 +136,8 @@ public final class DshService extends Service {
         // Android denies hardlinks; proot emulates them as symlinks. Required by the native
         // addon packages, which pnpm installs as links into its store.
         command.add("--link2symlink");
+        // Kill traced children when proot exits, otherwise a restart leaves node holding the port.
+        command.add("--kill-on-exit");
         command.add("-0");
         command.add("-r");
         command.add(rootfs.getAbsolutePath());
@@ -154,10 +161,12 @@ public final class DshService extends Service {
         // Cache V8 bytecode: module compilation repeats on every cold start otherwise.
         command.add("NODE_COMPILE_CACHE=/root/.cache/node-compile");
         command.add("/usr/local/bin/dsh");
+        int port = pickPort();
+        Log.i(TAG, "serving on 127.0.0.1:" + port);
         command.add("web");
         command.add("--no-open");
         command.add("--port");
-        command.add("3080");
+        command.add(String.valueOf(port));
 
         ProcessBuilder builder = new ProcessBuilder(command);
         builder.directory(runtime);
@@ -259,26 +268,90 @@ public final class DshService extends Service {
 
     /** Stop the current harness process and start it again, publishing a fresh URL. */
     private void restartHarness() {
-        synchronized (serverLock) {
-            File dir = runtimeDir;
-            if (dir == null) {
-                return;
-            }
-            if (process != null) {
-                process.destroy();
-                process = null;
-            }
-            currentUrl = null;
-            Thread thread = new Thread(() -> {
-                try {
-                    startServer(dir);
-                } catch (IOException error) {
-                    Log.e(TAG, "restart failed", error);
-                    broadcast(ACTION_FAILED, EXTRA_ERROR, String.valueOf(error.getMessage()));
-                }
-            }, "dsh-restart");
-            thread.start();
+        File dir = runtimeDir;
+        if (dir == null) {
+            return;
         }
+        // Stop and start off the control thread: waiting for proot to exit would block /reload and
+        // the next status request.
+        Thread thread = new Thread(() -> {
+            restarting = true;
+            Log.i(TAG, "restart requested");
+            stopHarness();
+            Log.i(TAG, "old harness stopped");
+            currentUrl = null;
+            try {
+                startServer(dir);
+            } catch (IOException error) {
+                Log.e(TAG, "restart failed", error);
+                broadcast(ACTION_FAILED, EXTRA_ERROR, String.valueOf(error.getMessage()));
+            } finally {
+                restarting = false;
+            }
+        }, "dsh-restart");
+        thread.start();
+    }
+
+    /**
+     * Terminate the harness and every child it spawned. Killing proot alone leaves the node
+     * process holding the loopback port, so the replacement cannot bind and exits.
+     */
+    private void stopHarness() {
+        stopHarness(true);
+    }
+
+    /**
+     * Terminate the harness process.
+     *
+     * @param waitForExit whether to block until it is gone; never true on the main thread
+     */
+    private void stopHarness(boolean waitForExit) {
+        Process current = process;
+        process = null;
+        if (current == null) {
+            return;
+        }
+        // SIGTERM lets proot clean up its tracees (--kill-on-exit); SIGKILL alone orphans node,
+        // which keeps holding the loopback port.
+        current.destroy();
+        try {
+            if (!current.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)) {
+                current.destroyForcibly();
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            current.destroyForcibly();
+        }
+        if (!waitForExit) {
+            return;
+        }
+        try {
+            if (!current.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) {
+                Log.w(TAG, "harness did not exit in time; starting a replacement anyway");
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * Pick a loopback port the harness can bind. A stale process from a previous install may still
+     * hold 3080, so the next free port in range is used instead of failing the boot.
+     *
+     * @return a bindable port
+     */
+    private int pickPort() {
+        for (int port = 3080; port < 3100; port++) {
+            if (port == CONTROL_PORT) {
+                continue;
+            }
+            try (java.net.ServerSocket probe = new java.net.ServerSocket(port, 1, InetAddress.getByName("127.0.0.1"))) {
+                return port;
+            } catch (IOException busy) {
+                // try the next one
+            }
+        }
+        return 3080;
     }
 
     private void createChannel() {
@@ -339,10 +412,7 @@ public final class DshService extends Service {
     @Override
     public void onDestroy() {
         currentUrl = null;
-        if (process != null) {
-            process.destroy();
-            process = null;
-        }
+        stopHarness();
         if (wakeLock != null && wakeLock.isHeld()) {
             wakeLock.release();
         }
