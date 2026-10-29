@@ -10,46 +10,60 @@ import java.io.File;
 import java.io.IOException;
 
 /**
- * Resolves the workspace directory shared with the phone's file manager. The harness profile stays
- * inside the unpacked image so per-file access works under proot; {@link RuntimeInstaller}
+ * Resolves the directories shared with the phone's file manager: the workspace and the home
+ * exchange folder. The harness profile stays inside the unpacked image; {@link RuntimeInstaller}
  * migrates it across image updates.
  */
 final class UserData {
     private static final String TAG = "DshUserData";
-    /** Folder name created on shared storage so a file manager can reach the workspace. */
+    /** Folder created on shared storage so a file manager can reach these directories. */
     private static final String SHARED_DIR = "DSH";
 
     final File work;
+    final File home;
 
-    private UserData(File work) {
+    private UserData(File work, File home) {
         this.work = work;
+        this.home = home;
     }
 
     /**
-     * Resolve the workspace directory, preferring shared storage.
+     * Resolve the shared directories, preferring shared storage.
      *
      * @param context application context
-     * @return the prepared workspace
+     * @return the prepared directories
      * @throws IOException when no directory can be created
      */
     static UserData prepare(Context context) throws IOException {
-        File work = sharedWorkspace(context);
-        if (work == null) {
-            work = new File(new File(context.getFilesDir(), "userdata"), "work");
-            if (!work.isDirectory() && !work.mkdirs()) {
-                throw new IOException("cannot create " + work);
-            }
+        File shared = sharedRoot(context);
+        File work;
+        File home;
+        if (shared != null) {
+            work = new File(shared, "work");
+            home = new File(shared, "home");
+        } else {
+            File root = new File(context.getFilesDir(), "userdata");
+            work = new File(root, "work");
+            home = new File(root, "home");
         }
-        return new UserData(work);
+        ensure(work);
+        ensure(home);
+        return new UserData(work, home);
+    }
+
+    private static void ensure(File dir) throws IOException {
+        if (!dir.isDirectory() && !dir.mkdirs()) {
+            throw new IOException("cannot create " + dir);
+        }
     }
 
     /**
-     * Resolve the shared workspace folder, creating it when storage permission is held.
+     * Resolve the shared workspace root, creating it when storage permission is held.
      *
      * @param context application context
      * @return the folder, or null when shared storage is unavailable or denied
      */
-    private static File sharedWorkspace(Context context) {
+    private static File sharedRoot(Context context) {
         if (context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
                 != PackageManager.PERMISSION_GRANTED) {
             return null;
@@ -57,7 +71,7 @@ final class UserData {
         // Canonical FUSE path: the /sdcard symlink resolves through /storage/self, which proot
         // cannot sanitize when it prepares a bind.
         File dir = new File("/storage/emulated/0", SHARED_DIR);
-        if (!dir.exists()) {
+        if (!dir.isDirectory() && !dir.mkdirs()) {
             File external = Environment.getExternalStorageDirectory();
             if (external != null) {
                 dir = new File(external, SHARED_DIR);

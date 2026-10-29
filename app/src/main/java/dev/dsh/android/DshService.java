@@ -150,6 +150,9 @@ public final class DshService extends Service {
         UserData data = UserData.prepare(this);
         command.add("-b");
         command.add(data.work.getAbsolutePath() + ":/root/work");
+        command.add("-b");
+        command.add(data.home.getAbsolutePath() + ":/root/home");
+        publishDocs(data);
         command.add("-w");
         command.add("/root");
         command.add("/usr/bin/env");
@@ -352,6 +355,37 @@ public final class DshService extends Service {
             }
         }
         return 3080;
+    }
+
+    /**
+     * Copy the operator guide and the recommended plugin list into the shared workspace, so the
+     * agent reads them as workspace files and the user sees them on the phone.
+     *
+     * @param data resolved shared directories
+     */
+    private void publishDocs(UserData data) {
+        writeIfChanged(new File(data.work, "DSH-ANDROID.md"), "docs/guide.md");
+        writeIfChanged(new File(data.work, "推荐插件.md"), "docs/plugins.md");
+    }
+
+    /**
+     * Copy a packaged document when the destination differs, so the workspace does not churn on
+     * every boot and edits to the asset reach existing installs.
+     *
+     * @param target destination inside the shared workspace
+     * @param asset asset path
+     */
+    private void writeIfChanged(File target, String asset) {
+        try (java.io.InputStream in = getAssets().open(asset)) {
+            byte[] bytes = in.readAllBytes();
+            if (target.isFile() && target.length() == bytes.length
+                    && java.util.Arrays.equals(java.nio.file.Files.readAllBytes(target.toPath()), bytes)) {
+                return;
+            }
+            java.nio.file.Files.write(target.toPath(), bytes);
+        } catch (IOException error) {
+            Log.w(TAG, "cannot publish " + target, error);
+        }
     }
 
     private void createChannel() {

@@ -34,7 +34,7 @@ final class RuntimeInstaller {
     /** Entry count of {@link #ROOTFS_ASSET}, used for unpack progress. */
     private static final int ROOTFS_ENTRIES = 86964;
     /** Layout version; bump when the extracted tree gains or loses files. */
-    private static final String LAYOUT_VERSION = "8";
+    private static final String LAYOUT_VERSION = "9";
 
     /** Receives coarse unpack progress for the notification and the loading screen. */
     interface Progress {
@@ -96,6 +96,11 @@ final class RuntimeInstaller {
 
         report(progress, 3, "unpacking harness runtime");
         extractRootfs(context, rootfs, progress);
+
+        File homeDir = new File(staged, "rootfs/root/home");
+        if (!homeDir.isDirectory() && !homeDir.mkdirs()) {
+            throw new IOException("cannot create " + homeDir);
+        }
 
         report(progress, 97, "keeping your sessions");
         try {
