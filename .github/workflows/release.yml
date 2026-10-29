@@ -70,8 +70,14 @@ jobs:
           APKSIGNER="$ANDROID_HOME/build-tools/36.1.0/apksigner"
           "$APKSIGNER" verify --print-certs app/build/outputs/apk/release/app-release.apk
 
+      - name: Rename artifact
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          cp app/build/outputs/apk/release/app-release.apk "dsh-${version}-release.apk"
+          ls -l "dsh-${version}-release.apk"
+
       - name: Attach APK to the release
         uses: softprops/action-gh-release@v2
         with:
-          files: app/build/outputs/apk/release/app-release.apk
+          files: dsh-*-release.apk
           fail_on_unmatched_files: true
