@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Pre-29 fallback: WebView reports a dark page, matching this theme. -->
+    <style name="AppTheme" parent="@android:style/Theme.Material.NoActionBar" />
+</resources>

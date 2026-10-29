@@ -27,10 +27,6 @@ import java.nio.charset.StandardCharsets;
 final class ControlPanel {
     private static final String TAG = "DshControl";
     private static final String PREF_AUTO_UPDATE = "auto_update";
-    private static final int BACKGROUND = 0xFF1C1C1E;
-    private static final int ROW = 0xFF2A2A2D;
-    private static final int TEXT = 0xFFECECEC;
-    private static final int MUTED = 0xFF8E8E93;
 
     /** Receives the outcome of an action. */
     interface Reporter {
@@ -60,19 +56,25 @@ final class ControlPanel {
         float density = context.getResources().getDisplayMetrics().density;
         int pad = (int) (18 * density);
         sheet.setPadding(pad, pad, pad, pad / 2);
-        sheet.setBackground(rounded(BACKGROUND, 22 * density));
+        sheet.setBackground(rounded(Theme.background(), 22 * density));
 
         TextView title = new TextView(context);
         title.setText("控制面板");
-        title.setTextColor(TEXT);
+        title.setTextColor(Theme.text());
         title.setTextSize(17f);
         title.setPadding((int) (4 * density), 0, 0, (int) (12 * density));
         sheet.addView(title);
 
+        section(context, sheet, density, "常用");
+        addAction(context, sheet, density, "刷新页面", "/reload", reporter);
+        addAction(context, sheet, density, "重启服务", "/restart", reporter);
+
+        section(context, sheet, density, "更新");
+        addAction(context, sheet, density, "检查更新", "/update", reporter);
         LinearLayout switchRow = row(context, density);
         TextView switchLabel = new TextView(context);
         switchLabel.setText("启动时自动检查更新");
-        switchLabel.setTextColor(TEXT);
+        switchLabel.setTextColor(Theme.text());
         switchLabel.setTextSize(14f);
         switchLabel.setLayoutParams(new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
@@ -84,15 +86,29 @@ final class ControlPanel {
                     .putBoolean(PREF_AUTO_UPDATE, checked).apply();
             reporter.report(checked ? "已开启自动检查更新" : "已关闭自动检查更新");
         });
+        int accent = Theme.accent();
+        int[][] states = {{android.R.attr.state_checked}, {}};
+        autoUpdate.setThumbTintList(new android.content.res.ColorStateList(states, new int[]{
+                accent, Theme.muted()}));
+        autoUpdate.setTrackTintList(new android.content.res.ColorStateList(states, new int[]{
+                withAlpha(accent, 0.45f), withAlpha(Theme.muted(), 0.30f)}));
         switchRow.addView(switchLabel);
         switchRow.addView(autoUpdate);
         sheet.addView(switchRow);
 
-        addAction(context, sheet, density, "刷新页面", "/reload", reporter);
-        addAction(context, sheet, density, "重启服务", "/restart", reporter);
-        addAction(context, sheet, density, "检查更新", "/update", reporter);
-        addAction(context, sheet, density, "导出家目录", "/export", reporter);
+        section(context, sheet, density, "数据");
         addAction(context, sheet, density, "备份当前配置", "/backup", reporter);
+        LinearLayout list = row(context, density);
+        TextView listText = new TextView(context);
+        listText.setText("查看备份并选择回滚");
+        listText.setTextColor(Theme.text());
+        listText.setTextSize(14f);
+        list.addView(listText);
+        list.setOnClickListener(view -> showBackups(context, density, reporter));
+        sheet.addView(list);
+        addAction(context, sheet, density, "导出家目录", "/export", reporter);
+
+        section(context, sheet, density, "危险操作");
         addAction(context, sheet, density, "回滚到上次可用配置", "/restore", reporter);
 
         ScrollView scroll = new ScrollView(context);
@@ -108,13 +124,34 @@ final class ControlPanel {
         dialog.show();
     }
 
+    /**
+     * Apply alpha to a packed ARGB color.
+     *
+     * @param color source color
+     * @param alpha 0..1 alpha
+     * @return color with the requested alpha
+     */
+    private static int withAlpha(int color, float alpha) {
+        int a = Math.round(255 * alpha);
+        return (color & 0x00FFFFFF) | (a << 24);
+    }
+
+    private static void section(Context context, LinearLayout sheet, float density, String title) {
+        TextView label = new TextView(context);
+        label.setText(title);
+        label.setTextColor(Theme.muted());
+        label.setTextSize(11.5f);
+        label.setPadding((int) (4 * density), (int) (10 * density), 0, (int) (6 * density));
+        sheet.addView(label);
+    }
+
     private static LinearLayout row(Context context, float density) {
         LinearLayout row = new LinearLayout(context);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
         int pad = (int) (14 * density);
         row.setPadding(pad, pad, pad, pad);
-        row.setBackground(rounded(ROW, 14 * density));
+        row.setBackground(rounded(Theme.row(), 14 * density));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         params.bottomMargin = (int) (8 * density);
@@ -122,7 +159,7 @@ final class ControlPanel {
         // Pressed state: without it a tap looks like it did nothing.
         android.graphics.drawable.StateListDrawable states = new android.graphics.drawable.StateListDrawable();
         states.addState(new int[]{android.R.attr.state_pressed}, rounded(0xFF3A3A3E, 14 * density));
-        states.addState(new int[]{}, rounded(ROW, 14 * density));
+        states.addState(new int[]{}, rounded(Theme.row(), 14 * density));
         row.setBackground(states);
         return row;
     }
@@ -132,7 +169,7 @@ final class ControlPanel {
         LinearLayout row = row(context, density);
         TextView text = new TextView(context);
         text.setText(label);
-        text.setTextColor(TEXT);
+        text.setTextColor("/restore".equals(path) ? Theme.danger() : Theme.text());
         text.setTextSize(14f);
         row.addView(text);
         row.setOnClickListener(view -> {
@@ -177,6 +214,49 @@ final class ControlPanel {
         return drawable;
     }
 
+    /**
+     * List snapshots and restore the one the user taps.
+     *
+     * @param context activity context
+     * @param density display density
+     * @param reporter result callback
+     */
+    private static void showBackups(android.content.Context context, float density, Reporter reporter) {
+        Thread worker = new Thread(() -> {
+            String body = post("/backups");
+            java.util.List<String> slots = new java.util.ArrayList<>();
+            int at = body.indexOf("[");
+            int end = body.indexOf("]");
+            if (at >= 0 && end > at) {
+                for (String part : body.substring(at + 1, end).split(",")) {
+                    String slot = part.replace("\"", "").trim();
+                    if (!slot.isEmpty()) {
+                        slots.add(slot);
+                    }
+                }
+            }
+            if (slots.isEmpty()) {
+                reporter.report("还没有手动备份，先点「备份当前配置」");
+                return;
+            }
+            android.app.Activity activity = (android.app.Activity) context;
+            activity.runOnUiThread(() -> {
+                String[] labels = slots.toArray(new String[0]);
+                Dialogs.list(activity, "选择要回滚的备份", labels, which -> {
+                    String slot = labels[which];
+                    Thread restore = new Thread(() -> {
+                        String result = post("/restore?slot=" + slot);
+                        reporter.report("回滚 " + slot + "：" + explain("/restore", result));
+                    }, "dsh-restore");
+                    restore.setDaemon(true);
+                    restore.start();
+                });
+            });
+        }, "dsh-backups");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
     private static void toast(android.content.Context context, String text) {
         android.widget.Toast toast = android.widget.Toast.makeText(context, text,
                 android.widget.Toast.LENGTH_SHORT);
@@ -204,8 +284,8 @@ final class ControlPanel {
             return "正在导出到 /sdcard/DSH/dsh";
         }
         if ("backed-up".equals(status)) {
-            String at = field(body, "at");
-            return "已备份：" + (at == null ? "last-good" : at);
+            String slot = field(body, "slot");
+            return "已备份 " + (slot == null ? "" : slot) + "（手机上见 /sdcard/DSH/backups）";
         }
         if ("restored".equals(status)) {
             String from = field(body, "from");
@@ -213,6 +293,10 @@ final class ControlPanel {
         }
         if ("no-backup".equals(status)) {
             return "没有可用备份（需先成功启动一次）";
+        }
+        if ("cached".equals(status)) {
+            String version = field(body, "version");
+            return "已下载 v" + (version == null ? "" : version) + "，已弹出安装提示";
         }
         if ("latest".equals(status)) {
             String version = field(body, "version");
