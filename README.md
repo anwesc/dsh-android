@@ -145,6 +145,19 @@ git tag v0.3.2 && git push --tags
 真正能在 CI 里挡住这类问题的是 lint 的 NewApi 检查：它按 minSdk 校验每个调用的 API 级别，`InputStream.readAllBytes`（API 33）这种「编译过、真机崩」的问题会被直接判错。
 
 `.github/workflows/ci.yml` 在每次 push/PR 跑 `assembleDebug` + `lintDebug`；`release.yml` 在出包前也跑一次 `lintRelease`。真机验证仍需人工完成一次（安装 → 首次解压 → 页面可用）。
+
+### 更新运行时镜像
+
+1. 在 arm64 环境重新生成 `rootfs.bin`（见上一节），放到 `app/src/main/assets/`；
+2. 如果是新的镜像代次，先把 `RuntimeInstaller.LAYOUT_VERSION` 加 1；
+3. 发布并同步 workflow：
+
+```bash
+GITHUB_TOKEN=ghp_xxx scripts/publish-runtime.sh --update-workflow
+```
+
+脚本会：从 `LAYOUT_VERSION` 推出 tag（如 `runtime-v10`）→ 计算 sha256 → 建/复用 Release → 上传 `rootfs.bin` → 改写 `release.yml` 里的 `RUNTIME_TAG` / `RUNTIME_SHA256`。
+加 `--dry-run` 只打印计划；`--tag`、`--repo`、`--draft` 可覆盖默认值。
 ## 已知限制
 
 - **APK ~307 MB**，首次安装解压约 20 s，之后冷启动约 20 s（proot 下模块解析的 stat 开销）。
