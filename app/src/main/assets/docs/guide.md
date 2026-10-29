@@ -5,7 +5,8 @@
 ## 目录
 - 工作区 `/root/work` = 手机 `内部存储/DSH/work`
 - 交换目录 `/root/home` = 手机 `内部存储/DSH/home`
-- profile（会话/插件/配置）在 `/root/.dsh`，不要删除
+- DSH 家目录 `/root/.dsh`（会话/插件/配置）：只读镜像到手机 `内部存储/DSH/dsh`，
+  由启动时或 `curl -s -X POST http://127.0.0.1:3081/export` 刷新；它不是挂载，写入请改容器里的原件
 
 ## 装完插件后如何重启
 不需要用户手动退出 App，直接执行：

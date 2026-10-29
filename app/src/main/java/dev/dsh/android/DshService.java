@@ -60,6 +60,7 @@ public final class DshService extends Service {
     private PowerManager.WakeLock wakeLock;
     private long bootStartedAt;
     private volatile File runtimeDir;
+    private volatile UserData sharedDirs;
     private final Object serverLock = new Object();
     private volatile boolean restarting;
 
@@ -153,6 +154,7 @@ public final class DshService extends Service {
         command.add("-b");
         command.add(data.home.getAbsolutePath() + ":/root/home");
         publishDocs(data);
+        publishHome(data);
         command.add("-w");
         command.add("/root");
         command.add("/usr/bin/env");
@@ -251,7 +253,10 @@ public final class DshService extends Service {
         BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
         String requestLine = reader.readLine();
         String body;
-        if (requestLine != null && requestLine.startsWith("POST /restart")) {
+        if (requestLine != null && requestLine.startsWith("POST /export")) {
+            publishHome(null);
+            body = "{\"status\":\"exporting\"}";
+        } else if (requestLine != null && requestLine.startsWith("POST /restart")) {
             restartHarness();
             body = "{\"status\":\"restarting\"}";
         } else if (requestLine != null && requestLine.startsWith("POST /reload")) {
@@ -355,6 +360,34 @@ public final class DshService extends Service {
             }
         }
         return 3080;
+    }
+
+    /**
+     * Mirror the harness home into shared storage so the phone's file manager can read sessions,
+     * plugins and settings.
+     *
+     * @param data shared directories, or null to reuse the last resolution
+     */
+    private void publishHome(UserData data) {
+        final UserData resolved = data != null ? data : this.sharedDirs;
+        if (resolved == null) {
+            return;
+        }
+        this.sharedDirs = resolved;
+        Thread thread = new Thread(() -> {
+            try {
+                File runtime = runtimeDir;
+                if (runtime == null) {
+                    return;
+                }
+                int files = DshHomeExporter.export(runtime, resolved.dsh);
+                Log.i(TAG, "exported " + files + " harness files to " + resolved.dsh);
+            } catch (IOException error) {
+                Log.w(TAG, "harness home export failed", error);
+            }
+        }, "dsh-export");
+        thread.setDaemon(true);
+        thread.start();
     }
 
     /**

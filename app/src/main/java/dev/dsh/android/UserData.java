@@ -21,10 +21,13 @@ final class UserData {
 
     final File work;
     final File home;
+    /** Mirror of the harness home (sessions, plugins, settings) for the file manager. */
+    final File dsh;
 
-    private UserData(File work, File home) {
+    private UserData(File work, File home, File dsh) {
         this.work = work;
         this.home = home;
+        this.dsh = dsh;
     }
 
     /**
@@ -48,7 +51,8 @@ final class UserData {
         }
         ensure(work);
         ensure(home);
-        return new UserData(work, home);
+        File dsh = new File(shared != null ? shared : new File(context.getFilesDir(), "userdata"), "dsh");
+        return new UserData(work, home, dsh);
     }
 
     private static void ensure(File dir) throws IOException {
