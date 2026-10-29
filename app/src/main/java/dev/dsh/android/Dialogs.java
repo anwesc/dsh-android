@@ -68,7 +68,19 @@ final class Dialogs {
         body.setTextColor(Theme.muted());
         body.setTextSize(13.5f);
         body.setPadding(0, 0, 0, dp(context, 18));
-        card.addView(body);
+        if (message.length() > 320) {
+            // Long release notes scroll inside a fixed area so the buttons stay reachable.
+            android.widget.ScrollView scroll = new android.widget.ScrollView(context);
+            int height = (int) (context.getResources().getDisplayMetrics().heightPixels * 0.34f);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, height);
+            params.bottomMargin = dp(context, 10);
+            scroll.setLayoutParams(params);
+            scroll.addView(body);
+            card.addView(scroll);
+        } else {
+            card.addView(body);
+        }
 
         LinearLayout buttons = new LinearLayout(context);
         buttons.setGravity(Gravity.END);

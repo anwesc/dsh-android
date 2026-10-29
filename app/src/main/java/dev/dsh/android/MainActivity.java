@@ -402,8 +402,11 @@ public final class MainActivity extends Activity {
             return;
         }
         updatePromptVisible = true;
-        Dialogs.choice(this, "发现新版本 v" + release.version,
-                "可以现在下载并安装，也可以稍后再更新。",
+        String notes = release.notes == null ? "" : release.notes.trim();
+        String message = notes.isEmpty()
+                ? "可以现在下载并安装，也可以稍后再更新。"
+                : notes + "\n\n可以现在下载并安装，也可以稍后再更新。";
+        Dialogs.choice(this, "发现新版本 v" + release.version, message,
                 "立即更新", () -> downloadUpdate(release), "稍后",
                 () -> updatePromptVisible = false);
     }

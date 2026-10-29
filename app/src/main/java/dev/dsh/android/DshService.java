@@ -330,8 +330,24 @@ public final class DshService extends Service {
         BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
         String requestLine = reader.readLine();
         String body;
-        if (requestLine != null
-                && (requestLine.startsWith("GET /backups") || requestLine.startsWith("POST /backups"))) {
+        // Exact path matching: prefix checks made /update swallow /update/auto and /update/forget.
+        String path = "";
+        String method = "";
+        if (requestLine != null) {
+            String[] parts = requestLine.split(" ");
+            if (parts.length >= 2) {
+                method = parts[0];
+                path = parts[1];
+            }
+        }
+        int mark = path.indexOf('?');
+        String route = mark < 0 ? path : path.substring(0, mark);
+        String query = mark < 0 ? "" : path.substring(mark + 1);
+
+        if ("GET".equals(method) && "/".equals(route)) {
+            String url = currentUrl;
+            body = "{\"url\":\"" + (url == null ? "" : url) + "\"}";
+        } else if ("/backups".equals(route)) {
             StringBuilder slots = new StringBuilder();
             if (safetyNet != null) {
                 for (String slot : safetyNet.manualSlots()) {
@@ -343,16 +359,24 @@ public final class DshService extends Service {
             }
             body = "{\"slots\":[" + slots + "],\"last-good\":"
                     + (safetyNet != null && safetyNet.hasGood()) + "}";
-        } else if (requestLine != null && requestLine.startsWith("GET /update/auto")) {
-            body = "{\"enabled\":" + autoUpdateEnabled() + "}";
-        } else if (requestLine != null && requestLine.startsWith("POST /update/auto")) {
-            boolean enabled = !requestLine.contains("enabled=false");
-            setAutoUpdate(enabled);
-            body = "{\"enabled\":" + enabled + "}";
-        } else if (requestLine != null && requestLine.startsWith("POST /install")) {
+        } else if ("/update/auto".equals(route)) {
+            if ("POST".equals(method)) {
+                boolean enabled = !query.contains("enabled=false");
+                setAutoUpdate(enabled);
+                body = "{\"enabled\":" + enabled + "}";
+            } else {
+                body = "{\"enabled\":" + autoUpdateEnabled() + "}";
+            }
+        } else if ("/update/forget".equals(route)) {
+            File cached = new File(getCacheDir(), "update.apk");
+            File partial = new File(getCacheDir(), "update.apk.part");
+            boolean removed = cached.delete() | partial.delete();
+            body = "{\"status\":\"" + (removed ? "cleared" : "nothing") + "\"}";
+        } else if ("/update".equals(route)) {
+            body = updateStatus();
+        } else if ("/install".equals(route)) {
             File apk = UpdateChecker.cachedApk(this);
             if (apk == null && sharedDirs != null) {
-                // Fallback: an APK dropped into the shared workspace (adb push / file manager).
                 apk = UpdateChecker.validApk(this, new File(sharedDirs.work, "update.apk"));
             }
             if (apk != null) {
@@ -361,19 +385,7 @@ public final class DshService extends Service {
             } else {
                 body = "{\"status\":\"no-file\"}";
             }
-        } else if (requestLine != null && requestLine.startsWith("POST /update")) {
-            body = updateStatus();
-        } else if (requestLine != null && requestLine.startsWith("POST /restore")) {
-            String slot = queryParam(requestLine, "slot");
-            String from = slot == null ? (safetyNet == null ? "无" : safetyNet.describeGood()) : slot;
-            boolean restored = safetyNet != null && safetyNet.restoreSlot(runtimeDir, slot);
-            body = "{\"status\":\"" + (restored ? "restored" : "no-backup")
-                    + "\",\"from\":\"" + from.replace("\"", "") + "\"}";
-            if (restored) {
-                restartHarness();
-            }
-
-        } else if (requestLine != null && requestLine.startsWith("POST /backup")) {
+        } else if ("/backup".equals(route)) {
             String slot = null;
             String where = "";
             if (safetyNet != null && runtimeDir != null) {
@@ -388,19 +400,29 @@ public final class DshService extends Service {
             body = "{\"status\":\"" + (slot != null ? "backed-up" : "failed")
                     + "\",\"slot\":\"" + (slot == null ? "" : slot)
                     + "\",\"at\":\"" + where.replace("\"", "") + "\"}";
-        } else if (requestLine != null && requestLine.startsWith("POST /export")) {
+        } else if ("/restore".equals(route)) {
+            String slot = queryParam("?" + query, "slot");
+            String from = slot == null ? (safetyNet == null ? "无" : safetyNet.describeGood()) : slot;
+            boolean restored = safetyNet != null && safetyNet.restoreSlot(runtimeDir, slot);
+            body = "{\"status\":\"" + (restored ? "restored" : "no-backup")
+                    + "\",\"from\":\"" + from.replace("\"", "") + "\"}";
+            if (restored) {
+                restartHarness();
+            }
+        } else if ("/export".equals(route)) {
             publishHome(null);
             body = "{\"status\":\"exporting\"}";
-        } else if (requestLine != null && requestLine.startsWith("POST /restart")) {
+        } else if ("/restart".equals(route)) {
             restartHarness();
             body = "{\"status\":\"restarting\"}";
-        } else if (requestLine != null && requestLine.startsWith("POST /reload")) {
+        } else if ("/reload".equals(route)) {
             broadcast(ACTION_RELOAD, EXTRA_PROGRESS, "");
             body = "{\"status\":\"reloading\"}";
         } else {
             String url = currentUrl;
             body = "{\"url\":\"" + (url == null ? "" : url) + "\"}";
         }
+
         byte[] payload = body.getBytes(StandardCharsets.UTF_8);
         OutputStream out = socket.getOutputStream();
         out.write(("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "

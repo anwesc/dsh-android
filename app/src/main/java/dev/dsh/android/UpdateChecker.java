@@ -30,10 +30,17 @@ final class UpdateChecker {
     static final class Release {
         final String version;
         final String apkUrl;
+        /** Release notes, trimmed for display. */
+        final String notes;
 
         Release(String version, String apkUrl) {
+            this(version, apkUrl, "");
+        }
+
+        Release(String version, String apkUrl, String notes) {
             this.version = version;
             this.apkUrl = apkUrl;
+            this.notes = notes == null ? "" : notes;
         }
     }
 
@@ -70,6 +77,7 @@ final class UpdateChecker {
             if (tag.startsWith("v") || tag.startsWith("V")) {
                 tag = tag.substring(1);
             }
+            String notes = plain(release.optString("body", ""));
             String apk = null;
             org.json.JSONArray assets = release.optJSONArray("assets");
             if (assets != null) {
@@ -82,12 +90,38 @@ final class UpdateChecker {
                     }
                 }
             }
-            return apk == null ? null : new Release(tag, apk);
+            return apk == null ? null : new Release(tag, apk, notes);
         } catch (org.json.JSONException malformed) {
             throw new IOException("malformed release payload", malformed);
         } finally {
             connection.disconnect();
         }
+    }
+
+    /**
+     * Strip Markdown so release notes read cleanly in a dialog.
+     *
+     * @param markdown raw release body
+     * @return plain text, capped for display
+     */
+    private static String plain(String markdown) {
+        StringBuilder out = new StringBuilder();
+        for (String line : markdown.split("\n")) {
+            String text = line.trim();
+            if (text.startsWith("|") || text.startsWith("---")) {
+                continue;
+            }
+            text = text.replaceAll("^#+\\s*", "")
+                    .replace("**", "")
+                    .replace("`", "")
+                    .replace("§", "");
+            if (text.startsWith("- ")) {
+                text = "• " + text.substring(2);
+            }
+            out.append(text).append('\n');
+        }
+        String result = out.toString().replaceAll("\n{3,}", "\n\n").trim();
+        return result.length() > 900 ? result.substring(0, 900) + "…" : result;
     }
 
     /**
