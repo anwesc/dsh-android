@@ -626,7 +626,11 @@ public final class DshService extends Service {
         int start = at + name.length() + 1;
         int end = requestLine.indexOf(' ', start);
         String raw = end < 0 ? requestLine.substring(start) : requestLine.substring(start, end);
-        return java.net.URLDecoder.decode(raw, java.nio.charset.StandardCharsets.UTF_8);
+        try {
+            return java.net.URLDecoder.decode(raw, "UTF-8");
+        } catch (java.io.UnsupportedEncodingException impossible) {
+            return raw;
+        }
     }
 
     /**
