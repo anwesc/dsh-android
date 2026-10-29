@@ -39,6 +39,8 @@ public final class DshService extends Service {
     static final String ACTION_PROGRESS = "dev.dsh.android.action.PROGRESS";
     /** Broadcast action asking the WebView to reload (after a plugin install). */
     static final String ACTION_RELOAD = "dev.dsh.android.action.RELOAD";
+    /** Broadcast action asking the activity to check for an app update. */
+    static final String ACTION_CHECK_UPDATE = "dev.dsh.android.action.CHECK_UPDATE";
     /** Loopback control port for restart/reload requests from inside the container. */
     private static final int CONTROL_PORT = 3081;
     /** Intent extra holding the progress line. */
@@ -61,6 +63,7 @@ public final class DshService extends Service {
     private long bootStartedAt;
     private volatile File runtimeDir;
     private volatile UserData sharedDirs;
+    private SafetyNet safetyNet;
     private final Object serverLock = new Object();
     private volatile boolean restarting;
 
@@ -97,6 +100,7 @@ public final class DshService extends Service {
         long started = System.currentTimeMillis();
         bootStartedAt = started;
         try {
+            safetyNet = new SafetyNet(getFilesDir());
             File runtime = RuntimeInstaller.install(this, (percent, stage) -> {
                 updateNotification(stage + " " + percent + "%");
                 broadcast(ACTION_PROGRESS, EXTRA_PROGRESS, describe(percent, stage));
@@ -108,8 +112,16 @@ public final class DshService extends Service {
             }
             Log.i(TAG, "runtime ready in " + (System.currentTimeMillis() - started) + "ms");
             runtimeDir = runtime;
+            if (safetyNet.beginBoot() && safetyNet.hasGood()) {
+                // The previous attempt never reached a served URL: put the good config back.
+                safetyNet.restore(runtime);
+            }
             startControlServer();
             startServer(runtime);
+            if (currentUrl == null && safetyNet.hasGood() && safetyNet.restore(runtime)) {
+                Log.w(TAG, "harness exited without a URL; retrying with the last good configuration");
+                startServer(runtime);
+            }
         } catch (Throwable error) {
             if (restarting) {
                 Log.i(TAG, "previous harness stopped for restart");
@@ -206,6 +218,9 @@ public final class DshService extends Service {
                 if (matcher.find() && currentUrl == null) {
                     Log.i(TAG, "harness ready in " + (System.currentTimeMillis() - bootStartedAt) + "ms");
                     currentUrl = matcher.group(1);
+                    if (safetyNet != null) {
+                        safetyNet.markGood(runtime);
+                    }
                     updateNotification("已就绪");
                     broadcast(ACTION_READY, EXTRA_URL, currentUrl);
                 }
@@ -251,7 +266,23 @@ public final class DshService extends Service {
         BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
         String requestLine = reader.readLine();
         String body;
-        if (requestLine != null && requestLine.startsWith("POST /export")) {
+        if (requestLine != null && requestLine.startsWith("POST /update")) {
+            broadcast(ACTION_CHECK_UPDATE, EXTRA_PROGRESS, "");
+            body = "{\"status\":\"checking\"}";
+        } else if (requestLine != null && requestLine.startsWith("POST /restore")) {
+            boolean restored = safetyNet != null && safetyNet.restore(runtimeDir);
+            body = "{\"status\":\"" + (restored ? "restored" : "no-backup") + "\"}";
+            if (restored) {
+                restartHarness();
+            }
+        } else if (requestLine != null && requestLine.startsWith("POST /backup")) {
+            boolean ok = false;
+            if (safetyNet != null && runtimeDir != null) {
+                safetyNet.markGood(runtimeDir);
+                ok = safetyNet.hasGood();
+            }
+            body = "{\"status\":\"" + (ok ? "backed-up" : "failed") + "\"}";
+        } else if (requestLine != null && requestLine.startsWith("POST /export")) {
             publishHome(null);
             body = "{\"status\":\"exporting\"}";
         } else if (requestLine != null && requestLine.startsWith("POST /restart")) {

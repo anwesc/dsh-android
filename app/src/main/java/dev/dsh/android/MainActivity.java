@@ -6,6 +6,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.Manifest;
 import android.content.IntentFilter;
+import android.widget.Toast;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.os.Build;
@@ -58,6 +59,8 @@ public final class MainActivity extends Activity {
                 }
             } else if (DshService.ACTION_FAILED.equals(action)) {
                 showStatus("启动失败：" + intent.getStringExtra(DshService.EXTRA_ERROR));
+            } else if (DshService.ACTION_CHECK_UPDATE.equals(action)) {
+                checkForUpdates();
             } else if (DshService.ACTION_RELOAD.equals(action)) {
                 if (webView != null) {
                     webView.reload();
@@ -157,6 +160,7 @@ public final class MainActivity extends Activity {
         filter.addAction(DshService.ACTION_FAILED);
         filter.addAction(DshService.ACTION_PROGRESS);
         filter.addAction(DshService.ACTION_RELOAD);
+        filter.addAction(DshService.ACTION_CHECK_UPDATE);
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
         } else {
@@ -165,6 +169,7 @@ public final class MainActivity extends Activity {
         receiverRegistered = true;
 
         startRuntime();
+        checkForUpdates();
         if (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
                 != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{
@@ -238,6 +243,31 @@ public final class MainActivity extends Activity {
         } catch (IOException error) {
             return "";
         }
+    }
+
+    /** Look for a newer published APK in the background and offer to install it. */
+    private void checkForUpdates() {
+        Thread thread = new Thread(() -> {
+            try {
+                UpdateChecker.Release release = UpdateChecker.latest();
+                String current = UpdateChecker.currentVersion(this);
+                if (release == null || !UpdateChecker.isNewer(release.version, current)) {
+                    Log.i(TAG, "app up to date (" + current + ")");
+                    return;
+                }
+                runOnUiThread(() -> Toast.makeText(this,
+                        "发现新版本 " + release.version + "，正在下载…", Toast.LENGTH_SHORT).show());
+                java.io.File apk = UpdateChecker.download(this, release);
+                runOnUiThread(() -> {
+                    Toast.makeText(this, "下载完成，开始安装", Toast.LENGTH_SHORT).show();
+                    UpdateChecker.install(this, apk);
+                });
+            } catch (java.io.IOException error) {
+                Log.w(TAG, "update check failed", error);
+            }
+        }, "dsh-update");
+        thread.setDaemon(true);
+        thread.start();
     }
 
     /**

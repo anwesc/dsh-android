@@ -100,6 +100,10 @@ debug 与 release 签名不同，两者不能互相覆盖：调试用 `assembleD
 | `POST /reload` | 让 WebView 重新加载页面（token 不变，最轻） |
 | `POST /restart` | 重启 `dsh web`，新 token 自动推给页面 |
 | `GET /` | 返回当前 URL |
+| `POST /backup` | 把当前 profile 配置记为 last-good |
+| `POST /restore` | 回滚到 last-good 并重启 |
+| `POST /export` | 把家目录镜像到 `/sdcard/DSH/dsh` |
+| `POST /update` | 检查 App 新版本（下载并拉起安装器） |
 
 助手在容器里直接执行即可（镜像自带 curl）：
 
