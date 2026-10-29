@@ -46,8 +46,10 @@ jobs:
           fi
           # Secrets copied from copy/paste tools often carry stray whitespace or quotes.
           printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]"' | base64 -d > dsh-release.jks
-          if ! head -c 4 dsh-release.jks | od -An -tx1 | tr -d ' \n' | grep -qi 'feedfeed'; then
-            echo "::error::KEYSTORE_BASE64 did not decode to a JKS keystore (got $(wc -c < dsh-release.jks) bytes)"
+          # JDK 21 writes a PKCS#12 keystore (no JKS magic), so validate with keytool instead.
+          if ! keytool -list -keystore dsh-release.jks \
+              -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" > /dev/null 2>&1; then
+            echo "::error::keystore does not open with the given password/alias (decoded $(wc -c < dsh-release.jks) bytes)"
             exit 1
           fi
           {
