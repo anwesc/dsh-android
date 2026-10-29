@@ -8,10 +8,10 @@ DeepSeek Harness 的 Android 壳：把 dsh 运行时（Ubuntu arm64 + Node 24 + 
 现成安装包在 [Releases](https://github.com/anwesc/dsh-android/releases)：
 
 ```
-https://github.com/anwesc/dsh-android/releases/download/v0.3.0/dsh-0.3.0-release.apk
+https://github.com/anwesc/dsh-android/releases/download/v1.0.1/dsh-1.0.1-release.apk
 ```
 
-- **只能侧载**（文件管理器点开安装 / `adb install -r dsh-0.3.0-release.apk`），无法上架 Google Play。
+- **只能侧载**（文件管理器点开安装 / `adb install -r dsh-1.0.1-release.apk`），无法上架 Google Play。
 - 首次启动解压约 20 秒（1.2 GB 运行时），之后冷启动约 20 秒；服务常驻时打开即用。
 - 小米/HyperOS 用 adb 安装新签名包时若报 `INSTALL_FAILED_USER_RESTRICTED`，
   需在开发者选项里打开「USB 安装」，或直接在手机上点 APK 安装。
@@ -27,7 +27,7 @@ DshService (前台服务, wakelock, 开机自启)
    │ 首次启动：解压 assets/rootfs.bin → files/runtime（1.2 GB）
    ├─ 迁移上一版 profile（保留会话/配置）
    ▼
-proot -0 -r <rootfs> … /usr/local/bin/dsh web --no-open --port 3080
+proot -0 -r <rootfs> … /usr/local/bin/dsh web --no-open --port <空闲端口>
    │ stdout 里的 "dsh web: http://…?token=…"
    ▼ 广播给 Activity → WebView 加载
 ```
@@ -114,7 +114,7 @@ curl -s -X POST http://127.0.0.1:3081/reload
 curl -s -X POST http://127.0.0.1:3081/restart
 ```
 
-端口被占用时（例如旧进程残留），服务会自动改用 3082–3099 里的空闲端口，URL 也随之变化。
+端口被占用时（例如旧进程残留），服务会在 3080–3099 里挑第一个空闲端口（跳过控制端口 3081），URL 也随之变化。
 
 ## 控制面板
 
@@ -147,10 +147,11 @@ PowerShell 取 base64：
 [Convert]::ToBase64String([IO.File]::ReadAllBytes("dsh-release.jks")) | Set-Clipboard
 ```
 
-发布新版本：
+发布新版本（先改 `versionCode`/`versionName` 再提交）：
 
 ```bash
-git tag v0.3.2 && git push --tags
+git tag v1.0.2
+git push origin refs/tags/v1.0.2   # --follow-tags 不会推轻量标签
 ```
 
 镜像更新时：把新镜像传到 `runtime-vN` Release，并同时改 `RuntimeInstaller.LAYOUT_VERSION`
@@ -178,11 +179,11 @@ GITHUB_TOKEN=ghp_xxx scripts/publish-runtime.sh --update-workflow
 加 `--dry-run` 只打印计划；`--tag`、`--repo`、`--draft` 可覆盖默认值。
 ## 已知限制
 
-- **APK ~307 MB**，首次安装解压约 20 s，之后冷启动约 20 s（proot 下模块解析的 stat 开销）。
-- **签名**：当前用 debug 签名，正式分发需替换 keystore。
+- **APK ~350 MB**，首次安装解压约 20 s，之后冷启动约 20 s（proot 下模块解析的 stat 开销）。
+- **签名**：分发包由 CI 用 `KEYSTORE_BASE64` 等 secrets 签名；本地没有 `keystore.properties` 时 `assembleRelease` 会退回 debug 签名，只能自己装，不能覆盖正式版。
 - **登录**：OAuth 页面由系统浏览器打开（WebView 里渲染不出来），授权回调打回 `127.0.0.1:3080`。
 - **插件**：不内置；通过「设置 → 插件 → 添加插件」安装，profile 随镜像升级迁移而保留。
-- **工作区**：`/sdcard/DSH`，系统文件管理器可直接读写。
+- **工作区**：容器内 `/root/work`，绑到手机 `内部存储/DSH/work`，系统文件管理器可直接读写。
 
 ## License / 第三方
 
