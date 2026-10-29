@@ -1,0 +1,67 @@
+name: release
+
+# Tag a commit (`git tag v0.3.2 && git push --tags`) to build and publish the APK.
+# Bump RUNTIME_TAG together with RuntimeInstaller.LAYOUT_VERSION.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  RUNTIME_TAG: runtime-v9
+  RUNTIME_SHA256: bb01ced5cd83682300c56420234bce174a7de1a30d3bf6db4a5a42b3322a4468
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Fetch runtime image
+        run: |
+          curl -fL --retry 3 --retry-delay 5 -o app/src/main/assets/rootfs.bin \
+            "https://github.com/anwesc/dsh-android/releases/download/${RUNTIME_TAG}/rootfs.bin"
+          echo "${RUNTIME_SHA256}  app/src/main/assets/rootfs.bin" | sha256sum -c -
+
+      - name: Prepare signing material
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::error::KEYSTORE_BASE64 secret is not configured"
+            exit 1
+          fi
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > dsh-release.jks
+          {
+            echo "storeFile=dsh-release.jks"
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > keystore.properties
+
+      - name: Build signed APK
+        run: ./gradlew --no-daemon --console=plain assembleRelease
+
+      - name: Verify signature
+        run: |
+          APKSIGNER="$ANDROID_HOME/build-tools/36.1.0/apksigner"
+          "$APKSIGNER" verify --print-certs app/build/outputs/apk/release/app-release.apk
+
+      - name: Attach APK to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/build/outputs/apk/release/app-release.apk
+          fail_on_unmatched_files: true

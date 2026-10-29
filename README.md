@@ -110,6 +110,34 @@ curl -s -X POST http://127.0.0.1:3081/restart
 
 端口被占用时（例如旧进程残留），服务会自动改用 3082–3099 里的空闲端口，URL 也随之变化。
 
+## CI 出包
+
+`.github/workflows/release.yml`：打 `v*` tag 时自动下载运行时镜像、签名并附加 APK 到 Release。
+
+首次配置需要在仓库 Settings → Secrets and variables → Actions 里加 4 个 secret：
+
+| Secret | 值 |
+|---|---|
+| `KEYSTORE_BASE64` | `base64 -w0 dsh-release.jks` 的整行输出 |
+| `KEYSTORE_PASSWORD` | `keystore.properties` 里的 `storePassword` |
+| `KEY_ALIAS` | `keystore.properties` 里的 `keyAlias` |
+| `KEY_PASSWORD` | `keystore.properties` 里的 `keyPassword` |
+
+PowerShell 取 base64：
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("dsh-release.jks")) | Set-Clipboard
+```
+
+发布新版本：
+
+```bash
+git tag v0.3.2 && git push --tags
+```
+
+镜像更新时：把新镜像传到 `runtime-vN` Release，并同时改 `RuntimeInstaller.LAYOUT_VERSION`
+和 workflow 里的 `RUNTIME_TAG`/`RUNTIME_SHA256`。
+
 ## 已知限制
 
 - **APK ~307 MB**，首次安装解压约 20 s，之后冷启动约 20 s（proot 下模块解析的 stat 开销）。
