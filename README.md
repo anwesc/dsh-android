@@ -8,7 +8,7 @@ DeepSeek Harness 的 Android 壳：把 dsh 运行时（Ubuntu arm64 + Node 24 + 
 现成安装包在 [Releases](https://github.com/anwesc/dsh-android/releases)：
 
 ```
-https://github.com/anwesc/dsh-android/releases/download/v1.0.1/dsh-1.0.1-release.apk
+https://github.com/anwesc/dsh-android/releases/download/v1.0.2/dsh-1.0.2-release.apk
 ```
 
 - **只能侧载**（文件管理器点开安装 / `adb install -r dsh-1.0.1-release.apk`），无法上架 Google Play。
