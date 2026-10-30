@@ -30,19 +30,22 @@ curl -s -X POST http://127.0.0.1:3081/reload
 所以市场里升级过的版本不会在下次开机被回滚。反过来，从市场卸载也不会让它消失（内置副本下次启动会补回），
 不想让它工作就把 `enabled` 改成 `false`。
 
-- 关键词写在 `/root/.dsh/qqbot-guard.json`，首次启动自动生成：
+- 关键词、开关都能在 **设置 → QQ 守护** 里改（1.1.0 起）：保存即生效，不用重启 App；
+  顶部还会显示 qqbot 有没有被找到、装在哪，排查「没找到」不用翻日志。
+- 也可以直接写 `/root/.dsh/qqbot-guard.json`（首次启动自动生成），改完下一条消息生效：
 
 ```json
 {
   "enabled": true,
   "triggers": ["大肥鱼", "肥鱼", "鱼鱼"],
-  "_note": "enabled=false 可整体关掉关键词放行；triggers 是群里不 @ 也能触发回复的词；改完重启 App 生效。"
+  "_note": "enabled=false 可整体关掉关键词放行；triggers 是群里不 @ 也能触发回复的词。"
 }
 ```
 
-- 改完关键词重启 App（或 POST `/reload`）即可，不用碰 YAML。
+- 设置页和这个 JSON 是同一份数据：改哪边都行，guard 每条消息前检查文件时间戳，变了就重读。
+  注意总开关 `enabled` 与预下载 `historyMedia` 要重启插件（或 POST `/reload`）才完全生效。
 - 群历史里会保留图片/语音/文件的摘要（`[图片「a.png」]`），表情占位符会被还原成 emoji；
-  两个都可在同一个 JSON 里关掉：`"faces": false`、`"historyAttachments": false`。
+  两个都能在设置页里关掉。
 - 想整体关掉这个补丁：把 `enabled` 改成 `false`（此时插件完全不改 qqbot 行为，回到只认 @）；
   想只关关键词、保留其他诊断，把 `triggers` 改成 `[]`。
 - 插件在启动时检查 profile 里的副本：缺包、损坏或内置版本更新时才写入，否则保留你装的那份。

@@ -19,8 +19,10 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 asset_dir="$repo/app/src/main/assets/plugin-seed/dsh-qqbot-guard"
 version_file="$repo/scripts/plugin-seed.version"
-# Only what the loader needs at runtime; tests and README stay in the plugin repo.
-files=(index.js package.json cordis.patch.yml)
+# Only what the loader and the settings page need at runtime; tests and README stay in the plugin repo.
+# client/client.js is the client-side bundle for the DSH settings section: without it the plugin
+# still works, but there is no way to configure it from the UI.
+files=(index.js package.json cordis.patch.yml client/client.js)
 
 check_only=false
 if [[ "${1:-}" == "--check" ]]; then
@@ -62,21 +64,31 @@ if $check_only; then
       stale=1
     fi
   done
+  # A file that is no longer part of the seed must not linger either.
+  while read -r extra; do
+    echo "unexpected asset: app/src/main/assets/plugin-seed/dsh-qqbot-guard/$extra (pinned $spec)" >&2
+    stale=1
+  done < <(
+    comm -13 <(printf '%s\n' "${files[@]}" | sort) \
+             <(cd "$asset_dir" 2>/dev/null && find . -type f -printf '%P\n' | sort)
+  )
   exit "$stale"
 fi
 
-mkdir -p "$asset_dir"
 for file in "${files[@]}"; do
+  mkdir -p "$asset_dir/$(dirname "$file")"
   cp -f "$source_dir/$file" "$asset_dir/$file"
   echo "synced $file"
 done
 
 # Keep the asset tree minimal: anything else would be copied into the profile as well.
 comm -13 <(printf '%s\n' "${files[@]}" | sort) \
-         <(find "$asset_dir" -maxdepth 1 -type f -printf '%f\n' | sort) |
+         <(cd "$asset_dir" && find . -type f -printf '%P\n' | sort) |
   while read -r extra; do
     echo "removing unexpected asset: $extra" >&2
     rm -f "$asset_dir/$extra"
+    # 清掉因此变空的子目录（client/ 被替换时会出现）
+    rmdir "$(dirname "$asset_dir/$extra")" 2>/dev/null || true
   done
 
 echo "plugin seed ready: $asset_dir ($spec)"

@@ -162,38 +162,72 @@ final class PluginSeed {
     /**
      * Copy every file of the asset plugin directory into the profile.
      *
+     * <p>The plugin ships a {@code client/} subdirectory (the settings page bundle), so this
+     * walks the asset tree instead of assuming a flat directory — a flat copy would leave the
+     * UI out and the settings section would silently never appear.</p>
+     *
      * @param assets asset manager
      * @param target destination directory, created when missing
      * @return true when all files were written
      */
     private static boolean copyPlugin(AssetManager assets, File target) {
+        String[] children;
         try {
-            if (!target.isDirectory() && !target.mkdirs()) {
-                throw new IOException("cannot create " + target);
-            }
-            String[] children = assets.list(ASSET_DIR);
-            if (children == null || children.length == 0) {
-                Log.w(TAG, "no plugin assets under " + ASSET_DIR);
-                return false;
-            }
-            boolean ok = true;
-            for (String child : children) {
-                ok &= copyAsset(assets, ASSET_DIR + "/" + child, new File(target, child));
-            }
-            return ok;
+            children = assets.list(ASSET_DIR);
         } catch (Exception error) {
-            Log.w(TAG, "cannot copy plugin assets", error);
+            Log.w(TAG, "cannot list plugin assets under " + ASSET_DIR, error);
             return false;
         }
+        if (children == null || children.length == 0) {
+            Log.w(TAG, "no plugin assets under " + ASSET_DIR);
+            return false;
+        }
+        if (!target.isDirectory() && !target.mkdirs()) {
+            Log.w(TAG, "cannot create " + target);
+            return false;
+        }
+        boolean ok = true;
+        for (String child : children) {
+            ok &= copyAssetTree(assets, ASSET_DIR + "/" + child, new File(target, child));
+        }
+        return ok;
     }
 
-    private static boolean copyAsset(AssetManager assets, String name, File destination) {
-        try (InputStream input = assets.open(name)) {
-            byte[] bytes = readAll(input);
-            writeIfChanged(destination, bytes);
+    /**
+     * Copy one asset, recursing into subdirectories.
+     *
+     * @param assets asset manager
+     * @param assetPath asset path, {@code /}-separated
+     * @param destination destination file or directory
+     * @return true when everything under the asset was written
+     */
+    private static boolean copyAssetTree(AssetManager assets, String assetPath, File destination) {
+        String[] children = null;
+        try {
+            children = assets.list(assetPath);
+        } catch (Exception ignored) {
+            // 文件（而非目录）在某些 Android 版本上会让 list 抛错，按文件处理即可
+        }
+        if (children != null && children.length > 0) {
+            try {
+                if (!destination.isDirectory() && !destination.mkdirs()) {
+                    throw new IOException("cannot create " + destination);
+                }
+                boolean ok = true;
+                for (String child : children) {
+                    ok &= copyAssetTree(assets, assetPath + "/" + child, new File(destination, child));
+                }
+                return ok;
+            } catch (Exception error) {
+                Log.w(TAG, "cannot copy plugin directory " + assetPath, error);
+                return false;
+            }
+        }
+        try (InputStream input = assets.open(assetPath)) {
+            writeIfChanged(destination, readAll(input));
             return true;
         } catch (Exception error) {
-            Log.w(TAG, "cannot copy asset " + name, error);
+            Log.w(TAG, "cannot copy asset " + assetPath, error);
             return false;
         }
     }
@@ -257,7 +291,8 @@ final class PluginSeed {
                 triggers.put(trigger);
             }
             json.put("triggers", triggers);
-            json.put("_note", "enabled=false 可整体关掉关键词放行；triggers 是群里不 @ 也能触发回复的词；改完重启 App 生效。");
+            json.put("_note", "enabled=false 可整体关掉关键词放行；triggers 是群里不 @ 也能触发回复的词。"
+                    + "改完即时生效，也可以直接在 DSH「设置 → QQ 守护」里改。");
             if (!home.isDirectory() && !home.mkdirs()) {
                 throw new IOException("cannot create " + home);
             }
