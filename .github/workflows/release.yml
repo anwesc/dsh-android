@@ -59,7 +59,7 @@ jobs:
             echo "keyPassword=$KEY_PASSWORD"
           } > keystore.properties
 
-      # Refuse to ship an APK whose bundled plugin copy lags plugins/qqbot-guard.
+      # Refuse to ship an APK whose bundled plugin copy lags the pinned npm version.
       - name: Plugin seed in sync
         run: bash scripts/sync-plugin-seed.sh --check
 
