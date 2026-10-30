@@ -25,6 +25,7 @@ curl -s -X POST http://127.0.0.1:3081/reload
 `dsh-qqbot-guard`，让群里出现关键词时也能触发对话（相当于帮你补一个 @）。
 
 它不一定要跟着 App 走：同一个包也能从插件市场单独装（`dsh plugin --profile web add dsh-qqbot-guard`）。
+源码和更新在 [dsh-qqbot-guard 仓库](https://github.com/anwesc/dsh-qqbot-guard)，App 自带的那份只是按版本号打包的副本。
 两条路装的是同一个目录，**已装的版本优先**——App 只在缺包或内置版本更新时才覆盖，
 所以市场里升级过的版本不会在下次开机被回滚。反过来，从市场卸载也不会让它消失（内置副本下次启动会补回），
 不想让它工作就把 `enabled` 改成 `false`。
