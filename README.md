@@ -8,7 +8,7 @@ DeepSeek Harness 的 Android 壳：把 dsh 运行时（Ubuntu arm64 + Node 24 + 
 现成安装包在 [Releases](https://github.com/anwesc/dsh-android/releases)：
 
 ```
-https://github.com/anwesc/dsh-android/releases/download/v1.0.3/dsh-1.0.3-release.apk
+https://github.com/anwesc/dsh-android/releases/download/v1.0.4/dsh-1.0.4-release.apk
 ```
 
 - **只能侧载**（文件管理器点开安装 / `adb install -r dsh-1.0.1-release.apk`），无法上架 Google Play。
@@ -107,7 +107,8 @@ DSH_QQBOT_GUARD_SRC=../dsh-qqbot-guard scripts/sync-plugin-seed.sh  # 用本地 
 启动时 `PluginSeed.install()` 在 `SafetyNet.beginBoot()` 之前做三件事（幂等）：
 
 1. 比对内置版本与 profile 里已装的 `dsh-qqbot-guard`（semver）：缺包、损坏或内置版本更新时才拷进
-   `rootfs/root/.dsh/profiles/web/node_modules/dsh-qqbot-guard`，否则保留已装的那份；
+   `rootfs/root/.dsh/profiles/web/node_modules/dsh-qqbot-guard`，否则保留已装的那份
+   （插件带 `client/` 子目录，拷贝是递归的——设置页的 UI 就靠它）；
 2. 把 `dsh-qqbot-guard` 并入 profile `package.json` 的 `dsh.profile.bundles`（已存在则不动）；
 3. 首次启动写 `/root/.dsh/qqbot-guard.json`（关键词 `大肥鱼`/`肥鱼`/`鱼鱼`），已存在则不覆盖。
 
@@ -180,8 +181,8 @@ PowerShell 取 base64：
 发布新版本（先改 `versionCode`/`versionName` 再提交）：
 
 ```bash
-git tag v1.0.3
-git push origin refs/tags/v1.0.3   # --follow-tags 不会推轻量标签
+git tag v1.0.4
+git push origin refs/tags/v1.0.4   # --follow-tags 不会推轻量标签
 ```
 
 镜像更新时：把新镜像传到 `runtime-vN` Release，并同时改 `RuntimeInstaller.LAYOUT_VERSION`
