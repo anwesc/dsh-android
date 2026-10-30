@@ -1,7 +1,10 @@
 # qqbot-guard
 
-dsh-android 内置的 **qqbot 增强层**（伴侣插件）。qqbot 主体仍由用户从插件市场安装，本插件只做进程内补丁，
-不修改 qqbot / SDK 的任何磁盘文件。
+**qqbot 增强层**（伴侣插件）。qqbot 主体仍由用户从插件市场安装（`@tencent-connect/dsh-qqbot`），
+本插件只做进程内补丁，不修改 qqbot / SDK 的任何磁盘文件。
+
+两种来源，包名相同：随 [dsh-android](https://github.com/anwesc/dsh-android) APK 内置，
+或从插件市场 / npm 单独安装（`dsh-qqbot-guard`）。
 
 ## 它补什么
 
@@ -28,11 +31,25 @@ mentions 后从正文摘掉。
 
 ## 安装
 
-1. 包放进 profile 的 `node_modules`（`~/.dsh/profiles/<profile>/node_modules/dsh-qqbot-guard`），
-   并在 `package.json` 的 `dependencies` + `dsh.profile.bundles` 里登记；
-2. 本包自带 `dsh.bundle.patch`（`cordis.patch.yml`，用 `- insert:` 插入 `qqbot-guard` 行），
-   被列入 bundles 后会自动生效——**不要**在 profile 的 `cordis.patch.yml` 里再写一条同 id 的新行；
-3. 需要改参数时，二选一：
+两种来源写的是同一个目录 `node_modules/dsh-qqbot-guard`，装其中一个即可：
+
+| 来源 | 怎么装 | 谁负责升级 |
+| --- | --- | --- |
+| 插件市场 / npm | 市场里搜 `dsh-qqbot-guard`，或 `dsh plugin --profile web add dsh-qqbot-guard` | 你自己（市场安装的版本优先） |
+| dsh-android 内置 | 随 APK 的 `plugin-seed` 自动复制进 profile | App 发新版时顺带升级 |
+
+`PluginSeed` 每次开机比较「内置版本」与「profile 已装版本」（semver）：已装版本有效且不比内置旧就
+**保留不覆盖**；只有缺 `index.js`、没有 `package.json`、版本号非法、或内置版本更新时才用资产覆盖。
+所以市场装的新版能活过重启，APK 带更新的内置版时也能自动升级。
+
+反过来，从市场卸载不会让它消失：下次启动内置副本会补回（这是「内置插件」的预期行为）。
+不想让它工作就设 `enabled: false`，而不是卸载。
+
+1. 先装好 qqbot（`@tencent-connect/dsh-qqbot`），本插件靠它才能拿到 bot 实例；
+2. 装本插件：市场安装，或 `dsh plugin --profile web add dsh-qqbot-guard`；
+3. 本包自带 `dsh.bundle.patch`（`cordis.patch.yml`，用 `- insert:` 插入 `qqbot-guard` 行），
+   被列入 `dsh.profile.bundles` 后会自动生效——**不要**在 profile 的 `cordis.patch.yml` 里再写一条同 id 的新行；
+4. 需要改参数时，二选一：
    - **JSON 后门（手机端推荐）**：编辑 `$DSH_HOME/qqbot-guard.json`
      （App 里是 `/root/.dsh/qqbot-guard.json`，首次启动由 `PluginSeed` 生成）；
    - **profile patch 覆盖**（能写 YAML 时）：
@@ -49,7 +66,7 @@ mentions 后从正文摘掉。
     verbose: true
 ```
 
-4. **重启 App**（bundles 变更不走热重载）。
+5. **重启 App**（bundles 变更不走热重载）。
 
 > 关键机制（`@deepseek-ai/dsh-app-boot` 的 `applyEntryPatches`）：普通 patch 只能改**已存在**的 id，
 > 找不到就 `warn` 并跳过；新增插件行只能用 `insert`。所以「只写一条 `- id: xxx` 到 profile patch」

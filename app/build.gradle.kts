@@ -75,4 +75,5 @@ android {
 
 dependencies {
     implementation("org.apache.commons:commons-compress:1.27.1")
+    testImplementation("junit:junit:4.13.2")
 }

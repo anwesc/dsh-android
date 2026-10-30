@@ -20,8 +20,9 @@ jobs:
 
       # 定位逻辑的回归：guard 与 qqbot 同在 profiles/web/node_modules 时必须能找到包，
       # 否则插件会在第一步静默 return（关键词放行 / 历史附件全失效）。
+      # 用 glob 而不是目录：`node --test <dir>` 只把目录当成一个用例，一个 .test.mjs 都不会跑。
       - name: Plugin tests
-        run: node --test plugins/qqbot-guard/
+        run: node --test plugins/qqbot-guard/*.test.mjs
 
       - uses: actions/setup-java@v4
         with:
@@ -42,6 +43,10 @@ jobs:
 
       - name: Assemble debug
         run: ./gradlew --no-daemon --console=plain assembleDebug
+
+      # SemVer 决定「市场安装的版本会不会被内置版覆盖」，排序错了就是静默回滚，用 JVM 单测守住。
+      - name: Unit tests
+        run: ./gradlew --no-daemon --console=plain testDebugUnitTest
 
       # NewApi is escalated to an error: it catches JDK methods the Android runtime lacks
       # (InputStream.readAllBytes crashed on device before this gate existed).

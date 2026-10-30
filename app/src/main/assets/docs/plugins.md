@@ -19,10 +19,15 @@ curl -s -X POST http://127.0.0.1:3081/reload
 
 或在 App 里：设置 → 插件 → 添加插件。
 
-## 随 App 内置：qqbot-guard
+## qqbot-guard（内置，也可单独安装）
 
 装了 `@tencent-connect/dsh-qqbot` 之后，群聊默认要求 @ 机器人才回复。App 自带一个补丁插件
 `dsh-qqbot-guard`，让群里出现关键词时也能触发对话（相当于帮你补一个 @）。
+
+它不一定要跟着 App 走：同一个包也能从插件市场单独装（`dsh plugin --profile web add dsh-qqbot-guard`）。
+两条路装的是同一个目录，**已装的版本优先**——App 只在缺包或内置版本更新时才覆盖，
+所以市场里升级过的版本不会在下次开机被回滚。反过来，从市场卸载也不会让它消失（内置副本下次启动会补回），
+不想让它工作就把 `enabled` 改成 `false`。
 
 - 关键词写在 `/root/.dsh/qqbot-guard.json`，首次启动自动生成：
 
@@ -39,7 +44,7 @@ curl -s -X POST http://127.0.0.1:3081/reload
   两个都可在同一个 JSON 里关掉：`"faces": false`、`"historyAttachments": false`。
 - 想整体关掉这个补丁：把 `enabled` 改成 `false`（此时插件完全不改 qqbot 行为，回到只认 @）；
   想只关关键词、保留其他诊断，把 `triggers` 改成 `[]`。
-- 插件在每次启动时重新落盘，所以升级 App 或回滚配置都不会把它弄丢。
+- 插件在启动时检查 profile 里的副本：缺包、损坏或内置版本更新时才写入，否则保留你装的那份。
 - 插件会按自己的安装位置自动找到 qqbot（同一个 profile 的 `node_modules`），不用配路径；
   只有日志里出现「没找到 @tencent-connect/dsh-qqbot」时，才需要在 `qqbot-guard.json` 里补
   `"qqbotPackage": "/root/.dsh/profiles/web/node_modules/@tencent-connect/dsh-qqbot"`。

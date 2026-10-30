@@ -20,9 +20,16 @@ import java.nio.charset.StandardCharsets;
  *
  * <p>The profile lives inside the rootfs ({@code rootfs/root/.dsh/profiles/web}), so a plugin that
  * ships with the APK has to be installed there rather than through the plugin market. This runs
- * before the harness starts and is idempotent: it re-copies the asset files and re-adds the bundle
- * name, which repairs a profile that was migrated from an older install, edited by the agent, or
- * rolled back by {@link SafetyNet}.</p>
+ * before the harness starts and is idempotent: it re-adds the bundle name and repairs a profile
+ * that was migrated from an older install, edited by the agent, or rolled back by
+ * {@link SafetyNet}.</p>
+ *
+ * <p><b>Two sources, one package name.</b> The same package can also be installed from npm
+ * ({@code dsh plugin --profile web add dsh-qqbot-guard}); the loader resolves bundles by directory
+ * name, so both sources write the same {@code node_modules/dsh-qqbot-guard} and one has to win.
+ * The installed copy is kept unless it is missing, incomplete, unparsable, or strictly older than
+ * the bundled one (compared with {@link SemVer}). A market install therefore survives every boot,
+ * while an APK that ships a newer build still upgrades everyone.</p>
  *
  * <p>Deliberately not registered as a {@code dependencies} entry: a {@code file:} specifier makes
  * later pnpm operations depend on the container path layout. The loader resolves bundles from
@@ -60,11 +67,96 @@ final class PluginSeed {
             Log.i(TAG, "profile not found, skipping plugin seed: " + profile);
             return false;
         }
-        boolean copied = copyPlugin(context.getAssets(), new File(profile, "node_modules/" + PLUGIN));
+        File pluginDir = new File(profile, "node_modules/" + PLUGIN);
+        String bundled = bundledVersion(context.getAssets());
+        String installed = installedVersion(pluginDir);
+        boolean refresh = shouldRefresh(pluginDir, bundled, installed);
+        boolean copied = !refresh || copyPlugin(context.getAssets(), pluginDir);
         boolean listed = ensureBundle(profile);
         ensureConfig(home);
-        Log.i(TAG, "plugin seed: copied=" + copied + " listed=" + listed + " at " + profile);
+        Log.i(TAG, "plugin seed: action=" + (refresh ? "refresh" : "keep")
+                + " bundled=" + describe(bundled) + " installed=" + describe(installed)
+                + " copied=" + copied + " listed=" + listed + " at " + profile);
         return copied && listed;
+    }
+
+    /**
+     * Decide whether the bundled copy should replace what is already in the profile.
+     *
+     * <p>Installed wins by default — that is what makes a market (or {@code dsh plugin add})
+     * install stick. The seed only steps in when the profile copy cannot serve requests:</p>
+     *
+     * <ul>
+     *   <li>{@code index.js} or the bundle patch is gone (pnpm pruned them, or a copy was
+     *       interrupted) → repair;</li>
+     *   <li>no {@code package.json} → nothing usable is installed;</li>
+     *   <li>the installed version is unparsable → the copy is damaged → repair;</li>
+     *   <li>both versions parse and the bundled one is strictly newer → upgrade.</li>
+     * </ul>
+     *
+     * <p>An unparsable <em>bundled</em> version never overwrites a valid installed one: a build
+     * whose own version tag is broken must not clobber a working profile.</p>
+     *
+     * @param pluginDir installed plugin directory inside the profile
+     * @param bundled   version declared by the asset {@code package.json}, null when unreadable
+     * @param installed version declared by the profile {@code package.json}, null when missing
+     * @return true when the assets must be copied over the installed directory
+     */
+    private static boolean shouldRefresh(File pluginDir, String bundled, String installed) {
+        if (!new File(pluginDir, "index.js").isFile()
+                || !new File(pluginDir, "cordis.patch.yml").isFile()
+                || installed == null) {
+            return true;
+        }
+        if (!SemVer.isValid(installed)) {
+            Log.w(TAG, "installed plugin version is not semver, repairing: " + installed);
+            return true;
+        }
+        if (!SemVer.isValid(bundled)) {
+            return false;
+        }
+        return SemVer.compare(bundled, installed) > 0;
+    }
+
+    /**
+     * Read the version declared by the asset {@code package.json}.
+     *
+     * @param assets asset manager
+     * @return the version string, or null when the asset is missing or unparsable
+     */
+    private static String bundledVersion(AssetManager assets) {
+        try (InputStream input = assets.open(ASSET_DIR + "/package.json")) {
+            String text = new String(readAll(input), StandardCharsets.UTF_8);
+            String version = new JSONObject(text).optString("version", "").trim();
+            return version.isEmpty() ? null : version;
+        } catch (Exception error) {
+            Log.w(TAG, "cannot read bundled plugin version", error);
+            return null;
+        }
+    }
+
+    /**
+     * Read the version declared by the plugin installed in the profile.
+     *
+     * @param pluginDir installed plugin directory
+     * @return the version string, or null when there is no readable {@code package.json}
+     */
+    private static String installedVersion(File pluginDir) {
+        File manifest = new File(pluginDir, "package.json");
+        if (!manifest.isFile()) {
+            return null;
+        }
+        try {
+            String version = new JSONObject(readText(manifest)).optString("version", "").trim();
+            return version.isEmpty() ? null : version;
+        } catch (Exception error) {
+            Log.w(TAG, "cannot read installed plugin version: " + manifest, error);
+            return null;
+        }
+    }
+
+    private static String describe(String version) {
+        return version == null ? "?" : version;
     }
 
     /**

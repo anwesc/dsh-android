@@ -40,7 +40,7 @@ proot -0 -r <rootfs> … /usr/local/bin/dsh web --no-open --port <空闲端口>
 | 路径 | 说明 |
 |---|---|
 | `app/src/main/java/dev/dsh/android/` | MainActivity、DshService、RuntimeInstaller、UserData、BootReceiver、PluginSeed |
-| `app/src/main/assets/plugin-seed/` | 每次启动被 `PluginSeed` 拷进 profile 的内置插件（生成目录，见下） |
+| `app/src/main/assets/plugin-seed/` | `PluginSeed` 在缺包/内置更新时写进 profile 的内置插件（生成目录，见下） |
 | `app/src/main/assets/mobile.css` | 窄屏修补（第三方桌面式插件的溢出/换行） |
 | `app/src/main/assets/runtime/` | proot 与其动态库、`libexec/proot/loader` |
 | `app/src/main/assets/rootfs.bin` | gzip 压缩的 rootfs（**不入库**，见下） |
@@ -104,16 +104,20 @@ scripts/sync-plugin-seed.sh --check  # CI 用：副本过期则非零退出
 
 启动时 `PluginSeed.install()` 在 `SafetyNet.beginBoot()` 之前做三件事（幂等）：
 
-1. 把资产拷进 `rootfs/root/.dsh/profiles/web/node_modules/dsh-qqbot-guard`；
-2. 把 `dsh-qqbot-guard` 并入 profile `package.json` 的 `dsh.profile.bundles`；
+1. 比对内置版本与 profile 里已装的 `dsh-qqbot-guard`（semver）：缺包、损坏或内置版本更新时才拷进
+   `rootfs/root/.dsh/profiles/web/node_modules/dsh-qqbot-guard`，否则保留已装的那份；
+2. 把 `dsh-qqbot-guard` 并入 profile `package.json` 的 `dsh.profile.bundles`（已存在则不动）；
 3. 首次启动写 `/root/.dsh/qqbot-guard.json`（关键词 `大肥鱼`/`肥鱼`/`鱼鱼`），已存在则不覆盖。
+
+这个包的版本是独立语义化版本（`plugins/qqbot-guard/package.json`），与 App 的版本号无关：市场里装了
+更新的 `dsh-qqbot-guard` 就一直是那份，直到 APK 内置的版本号更高才覆盖——所以「双轨」不会互相回滚。
 
 故意不写 `dependencies`：`file:` 依赖会绑死容器路径，而 loader 只按名字从 `node_modules` 解析。
 升级时 `RuntimeInstaller.migrateProfile()` 会用旧 profile 覆盖新解包的 profile，seed 在之后跑，正好补回。
 
 插件按**自身安装位置**反推 profile 的 `node_modules`（`…/profiles/web/node_modules/dsh-qqbot-guard` →
 `…/profiles/web/node_modules/@tencent-connect/dsh-qqbot`），所以 qqbot 装在 profile 里时不需要在配置里写
-`qqbotPackage`；自动探测落空的日志会列出试过的所有路径。回归用例：`node --test plugins/qqbot-guard/`。
+`qqbotPackage`；自动探测落空的日志会列出试过的所有路径。回归用例：`node --test plugins/qqbot-guard/*.test.mjs`。
 
 ## 让助手重启服务
 
