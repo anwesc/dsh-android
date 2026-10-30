@@ -55,8 +55,30 @@ mentions 后从正文摘掉。
 > 找不到就 `warn` 并跳过；新增插件行只能用 `insert`。所以「只写一条 `- id: xxx` 到 profile patch」
 > 会静默无效——踩过这个坑。
 
-`qqbotPackage` 建议显式写死：桌面端 App 的 `process.cwd()` 不是 profile 目录，`DSH_HOME` 也未必在环境里，
-自动探测可能落空（落空时日志会报「没找到 @tencent-connect/dsh-qqbot」）。
+`qqbotPackage` 一般**不用写**：插件会按下面的顺序自动定位 qqbot（命中即停）：
+
+| 顺序 | 位置 | 说明 |
+| --- | --- | --- |
+| 1 | `config.qqbotPackage` / `DSH_QQBOT_DIR` | 显式指定优先，用于非标准布局 |
+| 2 | 本插件自己所在的 `node_modules` | profile 布局：`<home>/profiles/<name>/node_modules/…`，**与 qqbot 是同一个目录** |
+| 3 | `<home>/profiles/*/node_modules` | 依次枚举各 profile；另含 pnpm 的 `.pnpm` store |
+| 4 | `<home>/node_modules`、`<home>/plugins/*/node_modules` | 插件市场早期的平铺布局 |
+| 5 | 从 `cwd` 按 Node 规则向上找 | 裸部署/仓库内调试 |
+
+`<home>` 依次取 `$DSH_HOME`、**从本插件的安装路径反推**（`…/profiles/<name>/node_modules/…` → `…`）、`~/.dsh`。
+第 2 条是这次修掉的关键：以前候选列表里没有 `profiles/<name>/node_modules` 这一层，手机端（qqbot 由插件市场装进 profile）
+每次都「没找到」然后**在第一步直接 return**，关键词放行、原型补丁、历史附件全部静默失效。
+
+只有真的找不到时才需要写死路径：
+
+```yaml
+- id: qqbot-guard
+  name: 'dsh-qqbot-guard'
+  config:
+    qqbotPackage: 'C:/Users/<you>/.dsh/profiles/<profile>/node_modules/@tencent-connect/dsh-qqbot'
+```
+
+找不到时的日志会列出**试过的每一处**安装路径（而不是只报一句「没找到」），可直接照着补 `qqbotPackage`。
 
 插件声明 `inject: ['agents']`，与 qqbot 插件同级，谁先启动都行。
 
@@ -70,7 +92,7 @@ mentions 后从正文摘掉。
 | `enabled` | `true` | 总开关；`false` 时插件什么都不做，qqbot 行为保持原样 |
 | `triggers` | `['大肥鱼', '肥鱼', '鱼鱼']` | 关键词列表，正文包含任一词即视为对我说话 |
 | `ignoreCase` | `true` | 关键词是否忽略大小写 |
-| `qqbotPackage` | `''` | dsh-qqbot 安装目录或它的 package.json；留空则自动探测 `DSH_HOME` / `cwd` |
+| `qqbotPackage` | `''` | dsh-qqbot 安装目录或它的 package.json；留空则自动探测（本插件同 profile 的 `node_modules` → `DSH_HOME/profiles/*` → `DSH_HOME` → `cwd` 向上） |
 | `configFile` | `''` | 外部 JSON 配置路径；留空时依次取 `$DSH_QQBOT_GUARD_CONFIG` → `$DSH_HOME/qqbot-guard.json` → `~/.dsh/qqbot-guard.json` |
 | `faces` | `true` | 把 `<faceType=…>` / `[<face,id=N/>]` 还原成 emoji；关掉则保持上游原样（上游会直接删标签） |
 | `historyAttachments` | `true` | 往群历史条目里补附件摘要（`[图片「a.png」]`）；关掉则历史里只剩文字 |
@@ -83,8 +105,14 @@ warn 然后忽略，不会让插件挂掉——手机上手改坏了不会变砖
 ## 自检
 
 ```bash
+node --test                     # 定位逻辑 + apply() 端到端回归（不需要真的装 qqbot）
 DSH_QQBOT_DIR=/path/to/node_modules/@tencent-connect/dsh-qqbot node selfcheck.mjs
 ```
+
+`discovery.test.mjs` 在 tmp 里造出设备上的真实布局（guard 与 qqbot 同在
+`profiles/web/node_modules`、`DSH_HOME` 未设、cwd 为空的 `work` 目录），断言能定位到包；
+`boot.test.mjs` 用假 qqbot 跑一遍 `apply()`，断言不再在第一步退出、且群消息关键词能补上
+`mentions.is_you`。这两个用例在旧实现上都会失败（失败点正是「没找到 @tencent-connect/dsh-qqbot」）。
 
 自检会：先按 qqbot 原样建 bot（补丁前）→ 装补丁 + 包装 history store → 喂五条消息
 （闲聊 / 关键词 / 真 @ / 表情占位符 / 纯图片），断言链头部是 guard、关键词消息被处理、

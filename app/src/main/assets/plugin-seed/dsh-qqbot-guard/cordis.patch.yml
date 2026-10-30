@@ -14,7 +14,9 @@
         # triggers 故意不写：由 $DSH_HOME/qqbot-guard.json 或 DEFAULT_CONFIG（大肥鱼/肥鱼/鱼鱼）决定，
         # 手机端改关键词不用碰 YAML。要在这里写死也行，会盖过 JSON 文件。
         ignoreCase: true
-        # 留空则自动探测；桌面端建议在 profile patch 里写死
+        # 留空则自动探测：先看本插件自己所在的 node_modules（也就是 profile 布局
+        # <home>/profiles/<name>/node_modules），再看 <home>/profiles/*、<home>/plugins/*，
+        # 最后从 cwd 按 Node 规则向上找。只有自动探测落空时才需要在这里写死路径。
         qqbotPackage: ''
         strictVersion: false
         verbose: true

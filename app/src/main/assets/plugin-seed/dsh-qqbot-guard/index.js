@@ -20,7 +20,7 @@
  *     群历史里只存 content，附件会整条消失，所以在读历史时补一句附件摘要
  *     （含本地路径——落盘名带随机后缀，只能读的时候按前缀去 media 目录里找）。
  */
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -42,7 +42,11 @@ export const DEFAULT_CONFIG = {
   triggers: ['大肥鱼', '肥鱼', '鱼鱼'],
   /** 关键词匹配是否忽略大小写 */
   ignoreCase: true,
-  /** dsh-qqbot 安装目录或 package.json 路径；留空则自动探测 */
+  /**
+   * dsh-qqbot 安装目录或 package.json 路径；留空则自动探测。
+   * 探测顺序见 findQqbotPackage()：本插件同 profile 的 node_modules → 各 dsh home 下的
+   * profiles/<name>/node_modules（含 pnpm 的 .pnpm store）→ 从 cwd 按 Node 规则向上找。
+   */
   qqbotPackage: '',
   /**
    * 外部 JSON 配置（给不便于改 cordis.patch.yml 的场景，例如手机端）。
@@ -160,40 +164,204 @@ function readPkg(dir) {
   }
 }
 
-/** 探测 dsh-qqbot 的安装目录（也就是 qqbot 插件本体）。 */
-export function findQqbotPackage(config = DEFAULT_CONFIG, logger = console) {
+/** 本文件自己的路径；用来反推 dsh 的目录布局（profile 布局下插件与 qqbot 同处一个 node_modules）。 */
+const SELF_FILE = (() => {
+  try {
+    return fileURLToPath(import.meta.url);
+  } catch {
+    return '';
+  }
+})();
+
+/** 统一成正斜杠再比较：设备上是 Linux，但桌面端调试时路径是 `D:\…`。 */
+function toPosix(p) {
+  return String(p ?? '').replace(/\\/g, '/');
+}
+
+function safeHomeDsh() {
+  try {
+    return join(homedir(), '.dsh');
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 从本插件的安装位置反推目录布局。
+ *
+ * 按 profile 组织时本文件在
+ * `<home>/profiles/<name>/node_modules/dsh-qqbot-guard/index.js`，
+ * 于是能直接拿到 `<home>` 和 profile 目录；qqbot 就装在同一个 node_modules 里。
+ *
+ * @param {string} [selfFile] 本插件入口文件；默认取 import.meta.url
+ * @returns {{home: string, profile: string, profileDir: string, dir: string}}
+ */
+export function locateSelfLayout(selfFile = SELF_FILE) {
+  const dir = selfFile ? dirname(selfFile) : '';
+  const m = toPosix(dir).match(/^(.*)\/profiles\/([^/]+)\/node_modules(\/|$)/);
+  if (!m) return { home: '', profile: '', profileDir: '', dir };
+  return { home: m[1], profile: m[2], profileDir: `${m[1]}/profiles/${m[2]}`, dir };
+}
+
+/**
+ * 按 Node 的 node_modules 向上查找规则列出候选路径。
+ *
+ * 从 startDir 起每一级看 `<dir>/node_modules/<pkg>`；如果这一级本身就叫 node_modules，
+ * 直接看 `<dir>/<pkg>`（否则会拼出 `node_modules/node_modules/…` 这种永远不存在的路径）。
+ *
+ * @param {string} startDir 起点目录
+ * @param {string} pkg 包名（可带 scope）
+ * @param {string[]} [stopDirs] 走到这些目录就停（含），避免一路走到 `/` 把诊断列表刷满
+ * @returns {string[]} 候选安装目录，由近到远
+ */
+function nodeLookupCandidates(startDir, pkg, stopDirs = []) {
+  const stops = new Set((stopDirs ?? []).filter(Boolean).map((d) => toPosix(d).replace(/\/+$/, '')));
+  const out = [];
+  let dir = startDir;
+  while (dir) {
+    const base = toPosix(dir).replace(/\/+$/, '').split('/').pop();
+    out.push(base === 'node_modules' ? join(dir, pkg) : join(dir, 'node_modules', pkg));
+    if (stops.has(toPosix(dir).replace(/\/+$/, ''))) break;
+    const parent = dirname(dir);
+    if (!parent || parent === dir) break;
+    dir = parent;
+  }
+  return out;
+}
+
+/**
+ * pnpm 布局：`<node_modules>/.pnpm/@tencent-connect+dsh-qqbot@<ver>/node_modules/<pkg>`。
+ * 顶层软链被 prune 掉时（或 symlink 未展开时）还能靠 store 找到。
+ *
+ * @param {string} nodeModules node_modules 目录
+ * @param {string} pkg 包名
+ * @returns {string[]} 候选安装目录
+ */
+function pnpmCandidates(nodeModules, pkg) {
+  const out = [];
+  const store = join(nodeModules, '.pnpm');
+  const prefix = `${pkg.replace('/', '+')}@`;
+  try {
+    for (const entry of readdirSync(store, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.startsWith(prefix)) continue;
+      out.push(join(store, entry.name, 'node_modules', pkg));
+    }
+  } catch {
+    /* 没有 .pnpm 目录 */
+  }
+  return out;
+}
+
+/**
+ * 列出 qqbot 的所有候选安装目录（按优先级，已去重）。
+ *
+ * 顺序：显式配置 → DSH_QQBOT_DIR → 本插件所在位置（Node 向上查找 + 同 profile 的 pnpm store）
+ * → 各 dsh home 下的 node_modules / plugins/* / profiles/* → cwd 向上查找。
+ *
+ * @param {object} config 插件配置
+ * @param {{selfFile?: string, cwd?: string, fallbackHome?: string}} [opts] 测试用注入点
+ * @returns {string[]} 候选目录
+ */
+export function qqbotCandidates(config = DEFAULT_CONFIG, opts = {}) {
+  const selfFile = opts.selfFile ?? SELF_FILE;
+  const cwd = opts.cwd ?? process.cwd();
   const candidates = [];
-  const push = (p) => {
-    if (p && typeof p === 'string') candidates.push(p);
+  const seen = new Set();
+  const push = (...paths) => {
+    for (const p of paths.flat()) {
+      if (!p || typeof p !== 'string') continue;
+      const key = toPosix(p);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      candidates.push(p);
+    }
   };
-  push(config.qqbotPackage);
+
+  // 1. 显式配置 > 环境变量
+  push(config?.qqbotPackage);
   push(process.env.DSH_QQBOT_DIR);
 
-  const home = process.env.DSH_HOME;
-  if (home) {
+  const layout = locateSelfLayout(selfFile);
+  const homes = [];
+  const addHome = (h) => {
+    if (!h) return;
+    if (homes.some((x) => toPosix(x) === toPosix(h))) return;
+    homes.push(h);
+  };
+  addHome(process.env.DSH_HOME);
+  addHome(layout.home);
+  addHome(opts.fallbackHome !== undefined ? opts.fallbackHome : safeHomeDsh());
+
+  // 2. 本插件自己的位置：profile 布局（<home>/profiles/<name>/node_modules）走这条
+  if (selfFile) push(nodeLookupCandidates(dirname(selfFile), QQBOT_PKG, homes));
+  if (layout.profileDir) push(pnpmCandidates(join(layout.profileDir, 'node_modules'), QQBOT_PKG));
+
+  // 3. 各 dsh home 下的常见布局
+  for (const home of homes) {
     push(join(home, 'node_modules', QQBOT_PKG));
-    // 插件市场常见的两种落盘布局
+    push(pnpmCandidates(join(home, 'node_modules'), QQBOT_PKG));
+    // 插件市场早期的平铺布局
     push(join(home, 'plugins', 'node_modules', QQBOT_PKG));
-    const pluginRoot = join(home, 'plugins');
-    if (existsSync(pluginRoot)) {
+    const plugins = join(home, 'plugins');
+    if (existsSync(plugins)) {
       try {
-        for (const entry of readdirSync(pluginRoot, { withFileTypes: true })) {
+        for (const entry of readdirSync(plugins, { withFileTypes: true })) {
           if (!entry.isDirectory()) continue;
-          push(join(pluginRoot, entry.name, 'node_modules', QQBOT_PKG));
+          const nm = join(plugins, entry.name, 'node_modules');
+          push(join(nm, QQBOT_PKG));
+          push(pnpmCandidates(nm, QQBOT_PKG));
+        }
+      } catch {
+        /* 读不到就跳过 */
+      }
+    }
+    // 按 profile 组织：<home>/profiles/<name>/node_modules（插件市场的实际落盘位置）
+    const profiles = join(home, 'profiles');
+    if (existsSync(profiles)) {
+      try {
+        for (const entry of readdirSync(profiles, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue;
+          const nm = join(profiles, entry.name, 'node_modules');
+          push(join(nm, QQBOT_PKG));
+          push(pnpmCandidates(nm, QQBOT_PKG));
         }
       } catch {
         /* 读不到就跳过 */
       }
     }
   }
-  push(join(process.cwd(), 'node_modules', QQBOT_PKG));
 
+  // 4. cwd 向上（非 profile 的裸部署，保留旧行为）
+  push(nodeLookupCandidates(cwd, QQBOT_PKG));
+
+  return candidates;
+}
+
+/**
+ * 探测 dsh-qqbot 的安装目录（也就是 qqbot 插件本体）。
+ *
+ * 找不到时不会抛错，但会在日志里列出**试过的每一处**——以前只打一句「没找到」，
+ * 于是插件在第一步静默退出，花很久才定位到「候选列表缺 profiles/<name>/node_modules」。
+ *
+ * @param {object} config 插件配置
+ * @param {object} logger 日志
+ * @param {{selfFile?: string, cwd?: string, fallbackHome?: string}} [opts] 测试用注入点
+ * @returns {{pkg: object, dir: string, file: string} | null}
+ */
+export function findQqbotPackage(config = DEFAULT_CONFIG, logger = console, opts = {}) {
+  const candidates = qqbotCandidates(config, opts);
   for (const c of candidates) {
     const hit = readPkg(c);
     if (hit?.pkg?.name === QQBOT_PKG) return hit;
   }
+
+  const layout = locateSelfLayout(opts.selfFile ?? SELF_FILE);
+  const shown = candidates.slice(0, 12).map((c) => `\n  - ${c}`).join('');
+  const rest = candidates.length > 12 ? `\n  - …另有 ${candidates.length - 12} 处` : '';
   logger.warn?.(
-    `[qqbot-guard] 没找到 ${QQBOT_PKG}；请用 config.qqbotPackage 或环境变量 DSH_QQBOT_DIR 指向它的安装目录`,
+    `[qqbot-guard] 没找到 ${QQBOT_PKG}，补丁不会生效（关键词放行、历史附件都不可用）。` +
+      `\n  本插件在 ${layout.dir || '(未知)'}，共试了 ${candidates.length} 处：${shown}${rest}` +
+      `\n  可用 config.qqbotPackage 或环境变量 DSH_QQBOT_DIR 指定它的安装目录。`,
   );
   return null;
 }

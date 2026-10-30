@@ -9,7 +9,8 @@
     ".": "./index.js"
   },
   "scripts": {
-    "selfcheck": "node selfcheck.mjs"
+    "selfcheck": "node selfcheck.mjs",
+    "test": "node --test"
   },
   "dsh": {
     "manifestVersion": 1,

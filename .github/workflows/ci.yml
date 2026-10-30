@@ -14,6 +14,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # 定位逻辑的回归：guard 与 qqbot 同在 profiles/web/node_modules 时必须能找到包，
+      # 否则插件会在第一步静默 return（关键词放行 / 历史附件全失效）。
+      - name: Plugin tests
+        run: node --test plugins/qqbot-guard/
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin

@@ -40,3 +40,6 @@ curl -s -X POST http://127.0.0.1:3081/reload
 - 想整体关掉这个补丁：把 `enabled` 改成 `false`（此时插件完全不改 qqbot 行为，回到只认 @）；
   想只关关键词、保留其他诊断，把 `triggers` 改成 `[]`。
 - 插件在每次启动时重新落盘，所以升级 App 或回滚配置都不会把它弄丢。
+- 插件会按自己的安装位置自动找到 qqbot（同一个 profile 的 `node_modules`），不用配路径；
+  只有日志里出现「没找到 @tencent-connect/dsh-qqbot」时，才需要在 `qqbot-guard.json` 里补
+  `"qqbotPackage": "/root/.dsh/profiles/web/node_modules/@tencent-connect/dsh-qqbot"`。

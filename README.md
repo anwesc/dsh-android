@@ -111,6 +111,10 @@ scripts/sync-plugin-seed.sh --check  # CI 用：副本过期则非零退出
 故意不写 `dependencies`：`file:` 依赖会绑死容器路径，而 loader 只按名字从 `node_modules` 解析。
 升级时 `RuntimeInstaller.migrateProfile()` 会用旧 profile 覆盖新解包的 profile，seed 在之后跑，正好补回。
 
+插件按**自身安装位置**反推 profile 的 `node_modules`（`…/profiles/web/node_modules/dsh-qqbot-guard` →
+`…/profiles/web/node_modules/@tencent-connect/dsh-qqbot`），所以 qqbot 装在 profile 里时不需要在配置里写
+`qqbotPackage`；自动探测落空的日志会列出试过的所有路径。回归用例：`node --test plugins/qqbot-guard/`。
+
 ## 让助手重启服务
 
 装完插件后不必手动重启 App。服务在 `127.0.0.1:3081` 暴露控制端口（仅 loopback）：
