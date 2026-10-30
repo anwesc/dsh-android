@@ -94,12 +94,14 @@ debug 与 release 签名不同，两者不能互相覆盖：调试用 `assembleD
 
 ## 内置插件（plugin-seed）
 
-`plugins/qqbot-guard/` 是随 App 分发的补丁插件：装了 QQ 通道后，群里出现关键词也能触发对话。
-源码在仓库里，**装进 APK 的副本是生成物**：
+`dsh-qqbot-guard` 是随 App 分发的补丁插件：装了 QQ 通道后，群里出现关键词也能触发对话。
+它的源码、测试和发布都在独立仓库 [dsh-qqbot-guard](https://github.com/anwesc/dsh-qqbot-guard)；
+本仓库只保留**构建用的 seed**（生成物），版本由 `scripts/plugin-seed.version` 里 pin 的 npm 包决定：
 
 ```bash
-scripts/sync-plugin-seed.sh          # plugins/qqbot-guard → assets/plugin-seed/dsh-qqbot-guard
+scripts/sync-plugin-seed.sh          # 按 pin 的版本从 npm 拉 → assets/plugin-seed/dsh-qqbot-guard
 scripts/sync-plugin-seed.sh --check  # CI 用：副本过期则非零退出
+DSH_QQBOT_GUARD_SRC=../dsh-qqbot-guard scripts/sync-plugin-seed.sh  # 用本地 checkout（插件改了但还没发版）
 ```
 
 启动时 `PluginSeed.install()` 在 `SafetyNet.beginBoot()` 之前做三件事（幂等）：
@@ -109,7 +111,7 @@ scripts/sync-plugin-seed.sh --check  # CI 用：副本过期则非零退出
 2. 把 `dsh-qqbot-guard` 并入 profile `package.json` 的 `dsh.profile.bundles`（已存在则不动）；
 3. 首次启动写 `/root/.dsh/qqbot-guard.json`（关键词 `大肥鱼`/`肥鱼`/`鱼鱼`），已存在则不覆盖。
 
-这个包的版本是独立语义化版本（`plugins/qqbot-guard/package.json`），与 App 的版本号无关：市场里装了
+这个包的版本是独立语义化版本（插件仓库的 `package.json`），与 App 的版本号无关：市场里装了
 更新的 `dsh-qqbot-guard` 就一直是那份，直到 APK 内置的版本号更高才覆盖——所以「双轨」不会互相回滚。
 
 故意不写 `dependencies`：`file:` 依赖会绑死容器路径，而 loader 只按名字从 `node_modules` 解析。
@@ -117,7 +119,7 @@ scripts/sync-plugin-seed.sh --check  # CI 用：副本过期则非零退出
 
 插件按**自身安装位置**反推 profile 的 `node_modules`（`…/profiles/web/node_modules/dsh-qqbot-guard` →
 `…/profiles/web/node_modules/@tencent-connect/dsh-qqbot`），所以 qqbot 装在 profile 里时不需要在配置里写
-`qqbotPackage`；自动探测落空的日志会列出试过的所有路径。回归用例：`node --test plugins/qqbot-guard/*.test.mjs`。
+`qqbotPackage`；自动探测落空的日志会列出试过的所有路径。回归用例在插件仓库：`node --test *.test.mjs`。
 
 ## 让助手重启服务
 
