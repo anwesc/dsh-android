@@ -47,6 +47,8 @@ final class PluginSeed {
     private static final String CONFIG_NAME = "qqbot-guard.json";
     /** Keywords seeded on first boot; the user can edit the JSON afterwards. */
     private static final String[] DEFAULT_TRIGGERS = {"大肥鱼", "肥鱼", "鱼鱼"};
+    /** Plugin that earlier builds seeded and this one replaced; its dependencies no longer exist. */
+    private static final String LEGACY_PLUGIN = "@tencent-connect/dsh-qqbot";
 
     private PluginSeed() {
     }
@@ -72,11 +74,13 @@ final class PluginSeed {
         String installed = installedVersion(pluginDir);
         boolean refresh = shouldRefresh(pluginDir, bundled, installed);
         boolean copied = !refresh || copyPlugin(context.getAssets(), pluginDir);
+        boolean cleaned = dropLegacy(profile);
         boolean listed = ensureBundle(profile);
         ensureConfig(home);
         Log.i(TAG, "plugin seed: action=" + (refresh ? "refresh" : "keep")
                 + " bundled=" + describe(bundled) + " installed=" + describe(installed)
-                + " copied=" + copied + " listed=" + listed + " at " + profile);
+                + " copied=" + copied + " listed=" + listed + " cleaned=" + cleaned
+                + " at " + profile);
         return copied && listed;
     }
 
@@ -233,6 +237,117 @@ final class PluginSeed {
     }
 
     /**
+     * Read the profile manifest, repairing trailing garbage left by an older build's write.
+     *
+     * <p>JSON has a single root, so anything after the last closing brace can be dropped without
+     * losing data; that turns a boot-blocking corruption into a one-time fixup.</p>
+     *
+     * @param manifest profile package.json
+     * @return parsed manifest, or null when it cannot be recovered
+     */
+    private static JSONObject readManifest(File manifest) {
+        String text;
+        try {
+            text = readText(manifest);
+        } catch (IOException error) {
+            Log.w(TAG, "cannot read " + manifest, error);
+            return null;
+        }
+        int end = text.lastIndexOf('}');
+        if (end < 0) {
+            Log.w(TAG, "no object in " + manifest);
+            return null;
+        }
+        // org.json ignores anything after the root value, so a trailing-garbage file parses fine
+        // here and only the harness (JSON.parse) notices. Trim it before anyone else reads it.
+        String tail = text.substring(end + 1).trim();
+        try {
+            JSONObject root = new JSONObject(text.substring(0, end + 1));
+            if (!tail.isEmpty()) {
+                writeIfChanged(manifest, root.toString(2).concat("\n"));
+                Log.w(TAG, "repaired trailing garbage in " + manifest);
+            }
+            return root;
+        } catch (Exception broken) {
+            Log.w(TAG, "cannot parse " + manifest, broken);
+            return null;
+        }
+    }
+
+    /**
+     * Remove a plugin package that an earlier build seeded and this build replaced.
+     *
+     * <p>Its dependencies are no longer in the image, so leaving it behind makes every boot log a
+     * failed import. Only the package directory and its bundle entry are touched.</p>
+     *
+     * @param profile profile directory
+     * @return true when something was removed
+     */
+    private static boolean dropLegacy(File profile) {
+        boolean changed = false;
+        File legacy = new File(profile, "node_modules/" + LEGACY_PLUGIN);
+        if (legacy.exists()) {
+            deleteRecursively(legacy);
+            changed = !legacy.exists();
+            File scope = legacy.getParentFile();
+            String[] left = scope == null ? null : scope.list();
+            if (left != null && left.length == 0) {
+                deleteRecursively(scope);
+            }
+            Log.i(TAG, "removed legacy plugin at " + legacy);
+        }
+        File manifest = new File(profile, "package.json");
+        try {
+            JSONObject root = readManifest(manifest);
+            if (root == null) {
+                return changed;
+            }
+            JSONObject dsh = root.optJSONObject("dsh");
+            JSONObject section = dsh == null ? null : dsh.optJSONObject("profile");
+            JSONArray bundles = section == null ? null : section.optJSONArray("bundles");
+            if (bundles == null) {
+                return changed;
+            }
+            JSONArray kept = new JSONArray();
+            boolean dropped = false;
+            for (int i = 0; i < bundles.length(); i++) {
+                String name = bundles.optString(i);
+                if (LEGACY_PLUGIN.equals(name)) {
+                    dropped = true;
+                } else {
+                    kept.put(name);
+                }
+            }
+            if (dropped) {
+                section.put("bundles", kept);
+                writeIfChanged(manifest, root.toString(2).concat("\n"));
+                Log.i(TAG, "dropped legacy bundle " + LEGACY_PLUGIN);
+                changed = true;
+            }
+        } catch (Exception error) {
+            Log.w(TAG, "cannot clean legacy bundles", error);
+        }
+        return changed;
+    }
+
+    /**
+     * Delete a file or directory tree, logging anything that refuses to go.
+     *
+     * @param file target
+     */
+    private static void deleteRecursively(File file) {
+        File[] children = file.listFiles();
+        if (children != null) {
+            for (File child : children) {
+                deleteRecursively(child);
+            }
+        }
+        if (!file.delete() && file.exists()) {
+            Log.w(TAG, "cannot delete " + file);
+        }
+    }
+
+    /**
      * Add the plugin to {@code dsh.profile.bundles} in the profile package.json.
      *
      * @param profile profile directory
@@ -241,8 +356,10 @@ final class PluginSeed {
     private static boolean ensureBundle(File profile) {
         File manifest = new File(profile, "package.json");
         try {
-            String text = readText(manifest);
-            JSONObject root = new JSONObject(text);
+            JSONObject root = readManifest(manifest);
+            if (root == null) {
+                return false;
+            }
             JSONObject dsh = root.optJSONObject("dsh");
             if (dsh == null) {
                 dsh = new JSONObject();
