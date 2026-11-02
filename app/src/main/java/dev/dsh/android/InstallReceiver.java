@@ -20,6 +20,8 @@ public final class InstallReceiver extends BroadcastReceiver {
         Log.i(TAG, "install status " + status + " " + message);
         String text;
         if (status == PackageInstaller.STATUS_SUCCESS) {
+            // Drop the downloaded copy; the next check re-downloads only when a release appears.
+            UpdateChecker.clearCache(context);
             text = "安装完成";
         } else if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
             // The system asks the user to confirm; forward its intent.

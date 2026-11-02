@@ -25,6 +25,9 @@ curl -s -X POST http://127.0.0.1:3081/update
 # 关掉/打开「启动时自动检查更新」
 curl -s -X POST 'http://127.0.0.1:3081/update/auto?enabled=false'
 curl -s http://127.0.0.1:3081/update/auto
+
+# 删掉已下载的安装包（例如空间不够，或想强制重新下载）
+curl -s -X POST http://127.0.0.1:3081/update/forget
 ```
 
 启动失败时（进程退出但没有输出 URL），App 会弹窗请求确认是否回滚到上一次成功启动的配置，

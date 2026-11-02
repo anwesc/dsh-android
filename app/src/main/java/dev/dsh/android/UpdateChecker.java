@@ -187,6 +187,7 @@ final class UpdateChecker {
      * @throws IOException when the download fails
      */
     static File download(Context context, Release release, Progress progress) throws IOException {
+        pruneIdleResume(context);
         File target = new File(context.getCacheDir(), "update.apk");
         File partial = new File(context.getCacheDir(), "update.apk.part");
         long offset = partial.isFile() ? partial.length() : 0L;
@@ -236,30 +237,154 @@ final class UpdateChecker {
     }
 
     /**
-     * Return the cached update APK only when it is a complete archive.
+     * Return the cached update APK, but only when it is the release we expect.
+     *
+     * <p>Validating the archive alone is not enough: a package left over from an older release
+     * still parses, and the installer then rejects it as a downgrade — or, if the user's build
+     * already lags behind, silently installs the wrong version. So the package name, version and
+     * signing certificate all have to match before a cached file is offered.</p>
      *
      * @param context application context
-     * @return the APK file, or null when it is missing or truncated
+     * @param expectedVersion release tag this cache should hold, or null to skip the version check
+     * @return the APK file, or null when it is missing, truncated, or from another build
      */
-    static File cachedApk(Context context) {
-        return validApk(context, new File(context.getCacheDir(), "update.apk"));
+    static File cachedApk(Context context, String expectedVersion) {
+        return verifiedApk(context, new File(context.getCacheDir(), "update.apk"),
+                expectedVersion, true);
     }
 
     /**
-     * Validate an APK file with the package parser.
+     * Validate an APK belonging to this app.
      *
      * @param context application context
      * @param apk candidate file
-     * @return the file when it parses as a package, otherwise null
+     * @param expectedVersion required versionName, or null to accept any version
+     * @param deleteWhenStale true to remove the file once it is proven unusable
+     * @return the file when it can be installed over this app, otherwise null
      */
-    static File validApk(Context context, File apk) {
+    static File verifiedApk(Context context, File apk, String expectedVersion,
+                            boolean deleteWhenStale) {
         if (!apk.isFile()) {
             return null;
         }
         // A truncated archive still starts with "PK"; only the package parser rejects it.
-        android.content.pm.PackageInfo info =
-                context.getPackageManager().getPackageArchiveInfo(apk.getAbsolutePath(), 0);
-        return info != null ? apk : null;
+        android.content.pm.PackageInfo info = archive(context, apk);
+        if (info == null) {
+            Log.w(TAG, "ignoring unreadable update package " + apk.getAbsolutePath());
+            discard(apk, deleteWhenStale);
+            return null;
+        }
+        if (!context.getPackageName().equals(info.packageName)) {
+            Log.w(TAG, "ignoring update package for " + info.packageName);
+            discard(apk, deleteWhenStale);
+            return null;
+        }
+        if (expectedVersion != null && !expectedVersion.equals(info.versionName)) {
+            Log.w(TAG, "cached update is v" + info.versionName + ", expected v" + expectedVersion);
+            discard(apk, deleteWhenStale);
+            return null;
+        }
+        if (!sameSigner(context, info)) {
+            Log.w(TAG, "cached update is signed differently from this app");
+            discard(apk, deleteWhenStale);
+            return null;
+        }
+        return apk;
+    }
+
+    /**
+     * Read the archive's package metadata.
+     *
+     * @param context application context
+     * @param apk APK on disk
+     * @return parsed metadata, or null when the file is not a valid package
+     */
+    private static android.content.pm.PackageInfo archive(Context context, File apk) {
+        try {
+            return context.getPackageManager().getPackageArchiveInfo(apk.getAbsolutePath(),
+                    android.content.pm.PackageManager.GET_SIGNATURES);
+        } catch (RuntimeException unreadable) {
+            Log.w(TAG, "cannot parse " + apk.getName(), unreadable);
+            return null;
+        }
+    }
+
+    /**
+     * Check that a candidate APK carries the same signing certificate as the installed app.
+     *
+     * @param context application context
+     * @param candidate parsed candidate package
+     * @return true when both certificates match, or when either one is unavailable
+     */
+    private static boolean sameSigner(Context context, android.content.pm.PackageInfo candidate) {
+        android.content.pm.Signature[] theirs = candidate.signatures;
+        if (theirs == null || theirs.length == 0) {
+            return true;
+        }
+        try {
+            android.content.pm.PackageInfo installed = context.getPackageManager()
+                    .getPackageInfo(context.getPackageName(),
+                            android.content.pm.PackageManager.GET_SIGNATURES);
+            android.content.pm.Signature[] ours = installed.signatures;
+            if (ours == null || ours.length == 0) {
+                return true;
+            }
+            return java.util.Arrays.equals(ours[0].toByteArray(), theirs[0].toByteArray());
+        } catch (android.content.pm.PackageManager.NameNotFoundException absent) {
+            return true;
+        }
+    }
+
+    /**
+     * Remove a download that cannot be installed, together with its resume file.
+     *
+     * @param apk APK file inside the cache directory
+     * @param delete false when the caller only wants the verdict
+     */
+    private static void discard(File apk, boolean delete) {
+        if (!delete) {
+            return;
+        }
+        File partial = new File(apk.getParentFile(), apk.getName() + ".part");
+        boolean removed = apk.delete() | partial.delete();
+        if (removed) {
+            Log.i(TAG, "discarded stale update package " + apk.getName());
+        }
+    }
+
+    /**
+     * Delete downloaded packages, for example once the installer reported success.
+     *
+     * @param context application context
+     */
+    static void clearCache(Context context) {
+        File dir = context.getCacheDir();
+        boolean removed = new File(dir, "update.apk").delete()
+                | new File(dir, "update.apk.part").delete();
+        if (removed) {
+            Log.i(TAG, "cleared downloaded update");
+        }
+    }
+
+    /**
+     * Drop a resume file that has been idle for a week: resuming a 350 MB download is cheaper than
+     * keeping the fragment forever on a phone that is short on space.
+     *
+     * @param context application context
+     */
+    static void pruneIdleResume(Context context) {
+        File partial = new File(context.getCacheDir(), "update.apk.part");
+        long idle = System.currentTimeMillis() - partial.lastModified();
+        if (partial.isFile() && idle > 7L * 24 * 60 * 60 * 1000 && partial.delete()) {
+            Log.i(TAG, "dropped idle resume file");
+        }
+        // A download the user never installed is dead weight after a month; a new one is
+        // reproducible from the release page.
+        File apk = new File(context.getCacheDir(), "update.apk");
+        long age = System.currentTimeMillis() - apk.lastModified();
+        if (apk.isFile() && age > 30L * 24 * 60 * 60 * 1000 && apk.delete()) {
+            Log.i(TAG, "dropped month-old update package");
+        }
     }
 
     /**

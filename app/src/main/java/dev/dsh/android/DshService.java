@@ -374,13 +374,18 @@ public final class DshService extends Service {
             File cached = new File(getCacheDir(), "update.apk");
             File partial = new File(getCacheDir(), "update.apk.part");
             boolean removed = cached.delete() | partial.delete();
+            getSharedPreferences("dsh", MODE_PRIVATE).edit().remove("update_version").apply();
             body = "{\"status\":\"" + (removed ? "cleared" : "nothing") + "\"}";
         } else if ("/update".equals(route)) {
             body = updateStatus();
         } else if ("/install".equals(route)) {
-            File apk = UpdateChecker.cachedApk(this);
+            String expected = getSharedPreferences("dsh", MODE_PRIVATE)
+                    .getString("update_version", null);
+            File apk = UpdateChecker.cachedApk(this, expected);
             if (apk == null && sharedDirs != null) {
-                apk = UpdateChecker.validApk(this, new File(sharedDirs.work, "update.apk"));
+                // Legacy drop folder: validate but never delete a file the user put there.
+                apk = UpdateChecker.verifiedApk(this, new File(sharedDirs.work, "update.apk"),
+                        expected, false);
             }
             if (apk != null) {
                 broadcast(ACTION_INSTALL_READY, EXTRA_PROGRESS, apk.getAbsolutePath());
@@ -666,6 +671,10 @@ public final class DshService extends Service {
      * @param version release version, for messages
      */
     private void startDownload(String url, String version) {
+        // Remember what this download is supposed to be; the installer flow validates the cached
+        // file against it, so an older package lying around cannot be installed by mistake.
+        getSharedPreferences("dsh", MODE_PRIVATE).edit()
+                .putString("update_version", version).apply();
         Thread thread = new Thread(() -> {
             android.app.NotificationManager manager =
                     (android.app.NotificationManager) getSystemService(NOTIFICATION_SERVICE);
@@ -731,8 +740,9 @@ public final class DshService extends Service {
             UpdateChecker.Release release = UpdateChecker.latest();
             String current = UpdateChecker.currentVersion(this);
             if (release != null && UpdateChecker.isNewer(release.version, current)) {
-                // Already downloaded? Offer the cached APK instead of fetching 350 MB again.
-                if (UpdateChecker.cachedApk(this) != null) {
+                // Already downloaded? Offer the cached APK instead of fetching 350 MB again —
+                // but only when the cached file really is this release.
+                if (UpdateChecker.cachedApk(this, release.version) != null) {
                     broadcast(ACTION_UPDATE_AVAILABLE, EXTRA_PROGRESS, release.version);
                     return "{\"status\":\"cached\",\"version\":\"" + release.version + "\"}";
                 }

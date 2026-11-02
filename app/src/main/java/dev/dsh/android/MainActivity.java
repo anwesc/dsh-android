@@ -368,7 +368,7 @@ public final class MainActivity extends Activity {
                     Log.i(TAG, "app up to date (" + current + ")");
                     return;
                 }
-                java.io.File cached = UpdateChecker.cachedApk(this);
+                java.io.File cached = UpdateChecker.cachedApk(this, release.version);
                 boolean alreadyPrompted = release.version.equals(getSharedPreferences("dsh", MODE_PRIVATE)
                         .getString("prompted_update", ""));
                 if (!manual && alreadyPrompted) {
@@ -448,6 +448,8 @@ public final class MainActivity extends Activity {
         }
         String message = intent.getStringExtra(android.content.pm.PackageInstaller.EXTRA_STATUS_MESSAGE);
         if (status == android.content.pm.PackageInstaller.STATUS_SUCCESS) {
+            // The package is installed; a 350 MB copy in the cache only wastes space now.
+            UpdateChecker.clearCache(this);
             Toast.makeText(this, "安装完成", Toast.LENGTH_LONG).show();
         } else {
             Toast.makeText(this, "安装未完成：" + (message == null ? "已取消" : message),
@@ -462,8 +464,15 @@ public final class MainActivity extends Activity {
      */
     private void installDownloaded(String path) {
         java.io.File apk = path == null ? null : new java.io.File(path);
-        if (apk == null || !apk.isFile()) {
-            apk = UpdateChecker.cachedApk(this);
+        // The download broadcast carries only the path, so the expected version lives in prefs;
+        // without it a stale file from an older release would be installed and rejected.
+        String expected = getSharedPreferences("dsh", MODE_PRIVATE)
+                .getString("update_version", null);
+        if (apk != null) {
+            apk = UpdateChecker.verifiedApk(this, apk, expected, false);
+        }
+        if (apk == null) {
+            apk = UpdateChecker.cachedApk(this, expected);
         }
         if (apk != null) {
             UpdateChecker.install(this, apk);
