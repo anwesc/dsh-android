@@ -8,7 +8,7 @@ DeepSeek Harness 的 Android 壳：把 dsh 运行时（Ubuntu arm64 + Node 24 + 
 现成安装包在 [Releases](https://github.com/anwesc/dsh-android/releases)：
 
 ```
-https://github.com/anwesc/dsh-android/releases/download/v1.0.5/dsh-1.0.5-release.apk
+https://github.com/anwesc/dsh-android/releases/download/v1.0.6/dsh-1.0.6-release.apk
 ```
 
 - **只能侧载**（文件管理器点开安装 / `adb install -r dsh-1.0.1-release.apk`），无法上架 Google Play。
@@ -181,8 +181,8 @@ PowerShell 取 base64：
 发布新版本（先改 `versionCode`/`versionName` 再提交）：
 
 ```bash
-git tag v1.0.5
-git push origin refs/tags/v1.0.5   # --follow-tags 不会推轻量标签
+git tag v1.0.6
+git push origin refs/tags/v1.0.6   # --follow-tags 不会推轻量标签
 ```
 
 镜像更新时：把新镜像传到 `runtime-vN` Release，并同时改 `RuntimeInstaller.LAYOUT_VERSION`

@@ -388,6 +388,35 @@ final class UpdateChecker {
     }
 
     /**
+     * Clean up after an earlier update run, once per service start.
+     *
+     * <p>The plain {@code ACTION_VIEW} installer path never reports success back to us, so a
+     * package the user did install stays in the cache. Anything that is no longer newer than the
+     * running build is useless either way — drop it instead of waiting for the next release.</p>
+     *
+     * @param context application context
+     */
+    static void sweepOnLaunch(Context context) {
+        pruneIdleResume(context);
+        File apk = new File(context.getCacheDir(), "update.apk");
+        if (!apk.isFile()) {
+            return;
+        }
+        String current = currentVersion(context);
+        android.content.pm.PackageInfo info = archive(context, apk);
+        if (info == null) {
+            Log.w(TAG, "dropping unreadable update package at launch");
+            clearCache(context);
+            return;
+        }
+        if (!isNewer(info.versionName, current)) {
+            Log.i(TAG, "dropping update package v" + info.versionName
+                    + " at launch (running v" + current + ")");
+            clearCache(context);
+        }
+    }
+
+    /**
      * Hand a downloaded APK to the system installer.
      *
      * @param context activity context

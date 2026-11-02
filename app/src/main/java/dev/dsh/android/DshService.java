@@ -92,6 +92,11 @@ public final class DshService extends Service {
             wakeLock.setReferenceCounted(false);
             wakeLock.acquire();
         }
+        // Parsing the cached APK costs a moment, so keep it off the main thread; a stale package
+        // (already installed, or older than this build) is dropped here instead of lingering.
+        Thread sweep = new Thread(() -> UpdateChecker.sweepOnLaunch(this), "dsh-update-sweep");
+        sweep.setDaemon(true);
+        sweep.start();
     }
 
     @Override
