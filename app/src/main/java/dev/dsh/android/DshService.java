@@ -117,22 +117,218 @@ public final class DshService extends Service {
     private final java.util.ArrayDeque<String> recentOutput = new java.util.ArrayDeque<>();
     /** Opened while the harness runs; null between starts. */
     private volatile PrintWriter harnessLog;
+    /** Last control request or harness activity, in {@link SystemClock#elapsedRealtime()} ms. */
+    private volatile long lastActivity;
+    /** Leases that ask the harness to stay up (owner -> expiry in elapsedRealtime ms). */
+    private final java.util.Map<String, Long> leases = new java.util.concurrent.ConcurrentHashMap<>();
+    /** True when a bundled always-on plugin (the chat bot) is configured. */
+    private volatile boolean resident;
+    /** How long one control request keeps the CPU awake after it returns. */
+    private static final long ACTIVITY_HOLD_MS = 60_000;
+    /** Suspends the harness after this long without requests or leases (when enabled). */
+    private static final long IDLE_CHECK_MS = 60_000;
+    /** Releases the wake lock once activity has stopped for {@link #ACTIVITY_HOLD_MS}. */
+    private final Runnable holdTimeout = this::maybeReleaseWake;
+    /** Periodic idle check; only runs when the user enabled idle shutdown. */
+    private final Runnable idleCheck = this::checkIdle;
 
     @Override
     public void onCreate() {
         super.onCreate();
         createChannel();
-        PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
-        if (power != null) {
-            wakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "dsh:runtime");
-            wakeLock.setReferenceCounted(false);
-            wakeLock.acquire();
-        }
+        // No wake lock here: the service is started at boot and usually idles. It is held only
+        // while a boot/restart is in flight and for a short window after each request.
+        touchActivity();
         // Parsing the cached APK costs a moment, so keep it off the main thread; a stale package
         // (already installed, or older than this build) is dropped here instead of lingering.
         Thread sweep = new Thread(() -> UpdateChecker.sweepOnLaunch(this), "dsh-update-sweep");
         sweep.setDaemon(true);
         sweep.start();
+    }
+
+    /**
+     * Mark the harness as active and keep the CPU awake for a short grace period.
+     */
+    private void touchActivity() {
+        lastActivity = SystemClock.elapsedRealtime();
+        PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
+        if (power == null) {
+            return;
+        }
+        if (wakeLock == null) {
+            wakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "dsh:runtime");
+            wakeLock.setReferenceCounted(false);
+        }
+        if (!wakeLock.isHeld()) {
+            wakeLock.acquire();
+            Log.i(TAG, "wake lock held");
+        }
+        mainHandler.removeCallbacks(holdTimeout);
+        mainHandler.postDelayed(holdTimeout, ACTIVITY_HOLD_MS);
+    }
+
+    private void maybeReleaseWake() {
+        long idleFor = SystemClock.elapsedRealtime() - lastActivity;
+        if (idleFor < ACTIVITY_HOLD_MS) {
+            return;
+        }
+        if (currentUrl == null || activeLeases() > 0) {
+            // Still booting, or a resident plugin (chat bot, watcher) asked to stay awake.
+            mainHandler.postDelayed(holdTimeout, ACTIVITY_HOLD_MS);
+            return;
+        }
+        if (wakeLock != null && wakeLock.isHeld()) {
+            wakeLock.release();
+            Log.i(TAG, "wake lock released after " + idleFor + "ms idle");
+        }
+    }
+
+    /**
+     * Whether the bundled QQ keyword watcher is configured and not switched off.
+     *
+     * @param data shared directories resolved for this boot
+     * @return true when the watcher is expected to keep a connection open
+     */
+    private boolean qqbotEnabled(UserData data) {
+        for (String name : new String[] {"qqbot-guard.json", "qqbot.json"}) {
+            File config = new File(data.dsh, name);
+            if (!config.isFile()) {
+                continue;
+            }
+            try (BufferedReader reader = new BufferedReader(new java.io.InputStreamReader(
+                    new java.io.FileInputStream(config), java.nio.charset.StandardCharsets.UTF_8))) {
+                StringBuilder text = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    text.append(line).append('\n');
+                }
+                return new org.json.JSONObject(text.toString()).optBoolean("enabled", true);
+            } catch (Exception error) {
+                Log.w(TAG, "cannot read " + config, error);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private int activeLeases() {
+        long now = SystemClock.elapsedRealtime();
+        int count = 0;
+        for (java.util.Iterator<java.util.Map.Entry<String, Long>> it = leases.entrySet().iterator();
+                it.hasNext(); ) {
+            if (it.next().getValue() < now) {
+                it.remove();
+            } else {
+                count++;
+            }
+        }
+        return count + (resident ? 1 : 0);
+    }
+
+    private String leasesJson() {
+        long now = SystemClock.elapsedRealtime();
+        StringBuilder out = new StringBuilder("{");
+        for (java.util.Map.Entry<String, Long> entry : leases.entrySet()) {
+            if (entry.getValue() < now) {
+                continue;
+            }
+            if (out.length() > 1) {
+                out.append(",");
+            }
+            out.append("\"").append(escape(entry.getKey())).append("\":")
+                    .append(Math.max(0, (entry.getValue() - now) / 1000));
+        }
+        return out.append("}").toString();
+    }
+
+    /**
+     * Register or refresh a lease so the harness survives idle shutdown.
+     *
+     * @param method HTTP method; only POST/PUT register a lease
+     * @param query query string carrying owner and ttl
+     * @return JSON body for the control response
+     */
+    private String handleLease(String method, String query) {
+        if ("GET".equals(method)) {
+            return "{\"leases\":" + leasesJson() + "}";
+        }
+        String owner = queryValue(query, "owner");
+        if (owner == null || owner.isEmpty()) {
+            return "{\"error\":\"owner required\"}";
+        }
+        int ttl = 120;
+        try {
+            String raw = queryValue(query, "ttl");
+            if (raw != null) {
+                ttl = Integer.parseInt(raw);
+            }
+        } catch (NumberFormatException ignored) {
+            // Keep the default; a malformed ttl should not drop the lease.
+        }
+        ttl = Math.max(30, Math.min(3600, ttl));
+        leases.put(owner, SystemClock.elapsedRealtime() + ttl * 1000L);
+        touchActivity();
+        Log.i(TAG, "lease " + owner + " for " + ttl + "s");
+        return "{\"owner\":\"" + escape(owner) + "\",\"ttl\":" + ttl + ",\"leases\":"
+                + leasesJson() + "}";
+    }
+
+    private String queryValue(String query, String key) {
+        for (String pair : query.split("&")) {
+            int eq = pair.indexOf('=');
+            if (eq > 0 && pair.substring(0, eq).equals(key)) {
+                return pair.substring(eq + 1);
+            }
+        }
+        return null;
+    }
+
+    /** Minutes of inactivity before the harness is suspended; 0 disables idle shutdown. */
+    private int idleMinutes() {
+        return getSharedPreferences("dsh", MODE_PRIVATE).getInt("idle_minutes", 0);
+    }
+
+    private void setAutoIdle(int minutes) {
+        getSharedPreferences("dsh", MODE_PRIVATE).edit()
+                .putInt("idle_minutes", Math.max(0, Math.min(240, minutes))).apply();
+    }
+
+    /** Called once the harness is ready; starts the idle timer when the user enabled it. */
+    private void scheduleIdleCheck() {
+        mainHandler.removeCallbacks(idleCheck);
+        if (idleMinutes() > 0) {
+            mainHandler.postDelayed(idleCheck, IDLE_CHECK_MS);
+        }
+    }
+
+    private void checkIdle() {
+        int minutes = idleMinutes();
+        if (minutes <= 0) {
+            return;
+        }
+        long idleFor = SystemClock.elapsedRealtime() - lastActivity;
+        PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
+        boolean screenOff = power != null && !power.isInteractive();
+        boolean idle = currentUrl != null && activeLeases() == 0 && screenOff
+                && idleFor >= minutes * 60_000L;
+        if (idle) {
+            Log.i(TAG, "idle for " + idleFor + "ms with no lease; stopping the harness");
+            Thread stop = new Thread(() -> {
+                releaseWake();
+                stopHarness();
+                stopSelf();
+            }, "dsh-idle-stop");
+            stop.setDaemon(true);
+            stop.start();
+            return;
+        }
+        mainHandler.postDelayed(idleCheck, IDLE_CHECK_MS);
+    }
+
+    private void releaseWake() {
+        if (wakeLock != null && wakeLock.isHeld()) {
+            wakeLock.release();
+        }
     }
 
     @Override
@@ -185,6 +381,7 @@ public final class DshService extends Service {
         if (worker != null && worker.isAlive()) {
             return;
         }
+        touchActivity();
         resetTimeline("service start");
         worker = new Thread(this::bootRuntime, "dsh-runtime");
         worker.start();
@@ -423,9 +620,15 @@ public final class DshService extends Service {
             safetyNet.markGood(runtimeDir);
             mirrorBackup();
         }
+        UserData data = sharedDirs;
+        resident = data != null && qqbotEnabled(data);
+        if (resident) {
+            Log.i(TAG, "qqbot configured; the harness stays awake while idle");
+        }
         updateNotification("已就绪");
         broadcast(ACTION_READY, EXTRA_URL, currentUrl);
         publishAfterReady();
+        scheduleIdleCheck();
     }
 
     /**
@@ -755,6 +958,7 @@ public final class DshService extends Service {
         int mark = path.indexOf('?');
         String route = mark < 0 ? path : path.substring(0, mark);
         String query = mark < 0 ? "" : path.substring(mark + 1);
+        touchActivity();
 
         if ("GET".equals(method) && "/".equals(route)) {
             String url = currentUrl;
@@ -773,6 +977,23 @@ public final class DshService extends Service {
                     + (safetyNet != null && safetyNet.hasGood()) + "}";
         } else if ("/diag".equals(route)) {
             body = diagReport();
+        } else if ("/lease".equals(route)) {
+            body = handleLease(method, query);
+        } else if ("/leases".equals(route)) {
+            body = "{\"leases\":" + leasesJson() + "}";
+        } else if ("/idle".equals(route)) {
+            if ("POST".equals(method)) {
+                String raw = queryValue(query, "minutes");
+                int minutes = 0;
+                try {
+                    minutes = raw == null ? 0 : Integer.parseInt(raw);
+                } catch (NumberFormatException ignored) {
+                    // Treat a malformed value as "disabled" instead of failing the request.
+                }
+                setAutoIdle(minutes);
+                scheduleIdleCheck();
+            }
+            body = "{\"minutes\":" + idleMinutes() + "}";
         } else if ("/update/auto".equals(route)) {
             if ("POST".equals(method)) {
                 boolean enabled = !query.contains("enabled=false");
