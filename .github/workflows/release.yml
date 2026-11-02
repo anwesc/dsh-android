@@ -92,10 +92,35 @@ jobs:
           fi
           echo "RELEASE_NAME=DSH ${GITHUB_REF_NAME#v} (Android)" >> "$GITHUB_ENV"
 
+      - name: Write update manifest
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          apk="dsh-${version}-release.apk"
+          python3 - "$version" "$apk" <<'PY'
+          import hashlib, json, sys
+          version, apk = sys.argv[1], sys.argv[2]
+          data = open(apk, "rb").read()
+          manifest = {
+              "version": version,
+              "apk": apk,
+              "size": len(data),
+              "sha256": hashlib.sha256(data).hexdigest(),
+              "urls": [
+                  f"https://github.com/anwesc/dsh-android/releases/download/v{version}/{apk}",
+              ],
+              "notes": open(".release-body.md", encoding="utf-8").read(),
+          }
+          with open("update.json", "w", encoding="utf-8") as out:
+              json.dump(manifest, out, ensure_ascii=False, indent=2)
+          PY
+          cat update.json
+
       - name: Attach APK to the release
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ env.RELEASE_NAME }}
           body_path: .release-body.md
-          files: dsh-*-release.apk
+          files: |
+            dsh-*-release.apk
+            update.json
           fail_on_unmatched_files: true

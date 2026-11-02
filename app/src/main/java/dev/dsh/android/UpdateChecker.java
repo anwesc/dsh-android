@@ -22,6 +22,14 @@ final class UpdateChecker {
     private static final String TAG = "DshUpdate";
     private static final String LATEST =
             "https://api.github.com/repos/anwesc/dsh-android/releases/latest";
+    /**
+     * Update manifest. The release asset is written by CI next to the APK, so it always
+     * matches what was published (version, size, SHA-256, mirrors); the GitHub API stays as
+     * a fallback for when the manifest cannot be reached.
+     */
+    private static final String[] MANIFESTS = {
+            "https://github.com/anwesc/dsh-android/releases/latest/download/update.json",
+    };
 
     private UpdateChecker() {
     }
@@ -32,15 +40,39 @@ final class UpdateChecker {
         final String apkUrl;
         /** Release notes, trimmed for display. */
         final String notes;
+        /** SHA-256 of the APK as published, or null when the source did not provide one. */
+        final String sha256;
+        /** Every URL that serves the APK, primary first. */
+        final java.util.List<String> urls;
 
         Release(String version, String apkUrl) {
-            this(version, apkUrl, "");
+            this(version, apkUrl, "", null);
         }
 
         Release(String version, String apkUrl, String notes) {
+            this(version, apkUrl, notes, null);
+        }
+
+        Release(String version, String apkUrl, String notes, String sha256) {
+            this(version, apkUrl, notes, sha256, null);
+        }
+
+        Release(String version, String apkUrl, String notes, String sha256,
+                java.util.List<String> mirrors) {
             this.version = version;
             this.apkUrl = apkUrl;
             this.notes = notes == null ? "" : notes;
+            this.sha256 = sha256;
+            java.util.List<String> all = new java.util.ArrayList<>();
+            all.add(apkUrl);
+            if (mirrors != null) {
+                for (String mirror : mirrors) {
+                    if (mirror != null && !mirror.isEmpty() && !all.contains(mirror)) {
+                        all.add(mirror);
+                    }
+                }
+            }
+            this.urls = java.util.Collections.unmodifiableList(all);
         }
     }
 
@@ -60,12 +92,99 @@ final class UpdateChecker {
     }
 
     /**
+     * Ask the published update manifests, then the GitHub API, for the latest release.
+     *
+     * <p>The API is rate limited and blocked in some networks, so a manifest published next to
+     * the release is tried first; it also carries the APK's SHA-256.</p>
+     *
+     * @return the newest release with an APK asset, or null when none qualifies
+     * @throws IOException when every source fails
+     */
+    static Release latest() throws IOException {
+        IOException failure = null;
+        // The manifests are useful but optional, so they get a small shared budget while the
+        // GitHub API stays the dependable fallback for a slow or filtered network.
+        long deadline = System.currentTimeMillis() + 8_000;
+        for (String source : MANIFESTS) {
+            if (System.currentTimeMillis() > deadline) {
+                Log.w(TAG, "manifest budget exhausted before " + source);
+                break;
+            }
+            try {
+                Release release = fetchManifest(source);
+                if (release != null) {
+                    return release;
+                }
+            } catch (IOException error) {
+                Log.w(TAG, "manifest " + source + " unavailable", error);
+                failure = error;
+            }
+        }
+        try {
+            return fetchApi();
+        } catch (IOException error) {
+            if (failure != null) {
+                error.addSuppressed(failure);
+            }
+            throw error;
+        }
+    }
+
+    /**
+     * Parse one update manifest.
+     *
+     * @param url manifest URL
+     * @return the described release, or null when the manifest is incomplete
+     * @throws IOException when the request fails
+     */
+    private static Release fetchManifest(String url) throws IOException {
+        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+        connection.setInstanceFollowRedirects(true);
+        connection.setRequestProperty("Accept", "application/json");
+        // Manifests are best-effort: a slow or blocked host must not stall the update check.
+        connection.setConnectTimeout(4_000);
+        connection.setReadTimeout(5_000);
+        try (InputStream in = connection.getInputStream()) {
+            String body = new String(readFully(in), java.nio.charset.StandardCharsets.UTF_8);
+            JSONObject manifest = new JSONObject(body);
+            String version = manifest.optString("version", "");
+            if (version.startsWith("v") || version.startsWith("V")) {
+                version = version.substring(1);
+            }
+            String sha = manifest.optString("sha256", "");
+            java.util.List<String> urls = new java.util.ArrayList<>();
+            org.json.JSONArray list = manifest.optJSONArray("urls");
+            if (list != null) {
+                for (int i = 0; i < list.length(); i++) {
+                    String item = list.optString(i, "");
+                    if (!item.isEmpty()) {
+                        urls.add(item);
+                    }
+                }
+            }
+            String apk = manifest.optString("url", "");
+            if (apk.isEmpty() && !urls.isEmpty()) {
+                apk = urls.remove(0);
+            }
+            if (version.isEmpty() || apk.isEmpty()) {
+                return null;
+            }
+            return new Release(version, apk, plain(manifest.optString("notes", "")),
+                    sha.isEmpty() ? null : sha, urls);
+        } catch (org.json.JSONException malformed) {
+            throw new IOException("malformed manifest", malformed);
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    /**
      * Ask GitHub for the latest release.
      *
      * @return the newest release with an APK asset, or null when none qualifies
      * @throws IOException when the request fails
      */
-    static Release latest() throws IOException {
+    private static Release fetchApi() throws IOException {
         HttpURLConnection connection = (HttpURLConnection) new URL(LATEST).openConnection();
         connection.setRequestProperty("Accept", "application/vnd.github+json");
         connection.setConnectTimeout(10_000);
@@ -79,6 +198,7 @@ final class UpdateChecker {
             }
             String notes = plain(release.optString("body", ""));
             String apk = null;
+            String sha = null;
             org.json.JSONArray assets = release.optJSONArray("assets");
             if (assets != null) {
                 for (int i = 0; i < assets.length(); i++) {
@@ -86,11 +206,15 @@ final class UpdateChecker {
                     String name = asset.optString("name", "");
                     if (name.endsWith("-release.apk") || name.equals("app-release.apk")) {
                         apk = asset.optString("browser_download_url", null);
+                        String digest = asset.optString("digest", "");
+                        if (digest.startsWith("sha256:")) {
+                            sha = digest.substring("sha256:".length());
+                        }
                         break;
                     }
                 }
             }
-            return apk == null ? null : new Release(tag, apk, notes);
+            return apk == null ? null : new Release(tag, apk, notes, sha);
         } catch (org.json.JSONException malformed) {
             throw new IOException("malformed release payload", malformed);
         } finally {
@@ -187,12 +311,53 @@ final class UpdateChecker {
      * @throws IOException when the download fails
      */
     static File download(Context context, Release release, Progress progress) throws IOException {
+        IOException failure = null;
+        boolean first = true;
+        for (String url : release.urls) {
+            try {
+                if (!first) {
+                    // A partial file belongs to the previous mirror; restart it cleanly.
+                    new File(context.getCacheDir(), "update.apk.part").delete();
+                }
+                first = false;
+                File apk = downloadOnce(context, url, progress);
+                if (apk == null) {
+                    return null;
+                }
+                if (release.sha256 != null) {
+                    String actual = sha256(apk);
+                    if (!release.sha256.equalsIgnoreCase(actual)) {
+                        apk.delete();
+                        throw new IOException("SHA-256 mismatch: published " + release.sha256
+                                + ", downloaded " + actual);
+                    }
+                }
+                return apk;
+            } catch (IOException error) {
+                Log.w(TAG, "download from " + url + " failed", error);
+                failure = error;
+            }
+        }
+        throw failure == null ? new IOException("no download source") : failure;
+    }
+
+    /**
+     * Fetch a URL into the update cache, resuming a partial file when possible.
+     *
+     * @param context application context
+     * @param url APK URL
+     * @param progress optional progress callback
+     * @return the downloaded file, or null when the callback aborted
+     * @throws IOException when the download fails
+     */
+    private static File downloadOnce(Context context, String url, Progress progress)
+            throws IOException {
         pruneIdleResume(context);
         File target = new File(context.getCacheDir(), "update.apk");
         File partial = new File(context.getCacheDir(), "update.apk.part");
         long offset = partial.isFile() ? partial.length() : 0L;
 
-        HttpURLConnection connection = (HttpURLConnection) new URL(release.apkUrl).openConnection();
+        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
         connection.setInstanceFollowRedirects(true);
         connection.setConnectTimeout(15_000);
         connection.setReadTimeout(60_000);
@@ -474,7 +639,36 @@ final class UpdateChecker {
         }
     }
 
+    /**
+     * Compute the SHA-256 of a file.
+     *
+     * @param file downloaded APK
+     * @return lowercase hex digest
+     * @throws IOException when the file cannot be read
+     */
+    private static String sha256(File file) throws IOException {
+        try (InputStream in = new java.io.FileInputStream(file)) {
+            java.security.MessageDigest digest;
+            try {
+                digest = java.security.MessageDigest.getInstance("SHA-256");
+            } catch (java.security.NoSuchAlgorithmException impossible) {
+                throw new IOException("SHA-256 unavailable", impossible);
+            }
+            byte[] buffer = new byte[1 << 16];
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                digest.update(buffer, 0, read);
+            }
+            StringBuilder hex = new StringBuilder();
+            for (byte value : digest.digest()) {
+                hex.append(String.format("%02x", value));
+            }
+            return hex.toString();
+        }
+    }
+
     private static byte[] readFully(InputStream in) throws IOException {
+
         java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
         byte[] buffer = new byte[8192];
         int read;
