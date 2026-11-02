@@ -108,6 +108,27 @@ final class ControlPanel {
         sheet.addView(list);
         addAction(context, sheet, density, "导出家目录", "/export", reporter);
 
+        section(context, sheet, density, "诊断");
+        LinearLayout diag = row(context, density);
+        TextView diagText = new TextView(context);
+        diagText.setText("查看启动耗时与上次退出");
+        diagText.setTextColor(Theme.text());
+        diagText.setTextSize(14f);
+        diag.addView(diagText);
+        diag.setOnClickListener(view -> {
+            diagText.setText("查看启动耗时与上次退出 · 读取中…");
+            Thread worker = new Thread(() -> {
+                String body = post("/diag");
+                view.post(() -> {
+                    diagText.setText("查看启动耗时与上次退出");
+                    Dialogs.choice(context, "启动诊断", readable(body), "知道了", () -> {}, null);
+                });
+            }, "dsh-diag");
+            worker.setDaemon(true);
+            worker.start();
+        });
+        sheet.addView(diag);
+
         section(context, sheet, density, "危险操作");
         addAction(context, sheet, density, "回滚到上次可用配置", "/restore", reporter);
 
@@ -313,6 +334,46 @@ final class ControlPanel {
             return "已开始检查，有新版本会提示";
         }
         return body.isEmpty() ? "无响应（服务未就绪？）" : body;
+    }
+
+    /**
+     * Turn the /diag JSON into the few lines a person reads.
+     *
+     * @param json raw response body
+     * @return readable report
+     */
+    private static String readable(String json) {
+        if (json == null || json.startsWith("!")) {
+            return "读取失败：" + json;
+        }
+        String timeline = unescape(field(json, "timeline"));
+        String lastExit = unescape(field(json, "last_exit"));
+        String output = unescape(field(json, "output"));
+        StringBuilder text = new StringBuilder();
+        if (!timeline.isEmpty()) {
+            text.append("本次启动：\n").append(timeline).append('\n');
+        }
+        if (!lastExit.isEmpty()) {
+            text.append("\n上次退出：\n").append(lastExit).append('\n');
+        }
+        if (!output.isEmpty()) {
+            text.append("\n引擎输出（末 40 行）：\n").append(output);
+        }
+        return text.length() == 0 ? "暂无记录" : text.toString();
+    }
+
+    /**
+     * Undo the JSON string escaping applied by the service.
+     *
+     * @param text escaped text
+     * @return plain text
+     */
+    private static String unescape(String text) {
+        if (text == null) {
+            return "";
+        }
+        return text.replace("\\n", "\n").replace("\\r", "\r").replace("\\t", "\t")
+                .replace("\\\"", "\"").replace("\\\\", "\\");
     }
 
     private static String field(String json, String key) {

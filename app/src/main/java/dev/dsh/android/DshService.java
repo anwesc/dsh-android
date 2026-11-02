@@ -6,12 +6,17 @@ import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Intent;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.PowerManager;
+import android.os.SystemClock;
 import android.util.Log;
 
 import java.io.BufferedReader;
+import java.io.FileOutputStream;
 import java.io.OutputStream;
+import java.io.PrintWriter;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -72,6 +77,23 @@ public final class DshService extends Service {
     /** Latest harness URL, shared with a re-created activity. */
     static volatile String currentUrl;
 
+    /** Preference holding the boot timeline of the most recent start, one stage per line. */
+    private static final String PREF_BOOT_TIMELINE = "boot_timeline";
+    /** Preference holding the exit reason of the most recent harness stop. */
+    private static final String PREF_LAST_EXIT = "last_exit";
+    /** Rotating copy of the harness output, readable through the control port. */
+    private static final String HARNESS_LOG = "harness.log";
+    /** Cap on the harness log before it is rotated to {@code harness.log.1}. */
+    private static final long HARNESS_LOG_LIMIT = 512 * 1024;
+    /** Stages kept from the last start. */
+    private static final int TIMELINE_IN_MEMORY = 40;
+    /** Consecutive failed starts that stop the automatic restart loop. */
+    private static final int MAX_BOOT_FAILURES = 3;
+    /** Failures older than this no longer count against the restart loop. */
+    private static final long FAILURE_WINDOW_MS = 10 * 60_000;
+    /** A boot that stayed up this long counts as healthy and clears the failure count. */
+    private static final long STABLE_BOOT_MS = 60_000;
+
     private Thread worker;
     private Process process;
     private PowerManager.WakeLock wakeLock;
@@ -81,6 +103,20 @@ public final class DshService extends Service {
     private SafetyNet safetyNet;
     private final Object serverLock = new Object();
     private volatile boolean restarting;
+    /** Boot stage labels with their offset in ms, newest last. */
+    private final List<String> bootStages = new ArrayList<>();
+    /** Number of failed starts since the last healthy boot. */
+    private int bootFailures;
+    /** When the failure window opened, in {@link SystemClock#elapsedRealtime()} ms. */
+    private long firstFailureAt;
+    /** Set once the restart loop gave up; a manual restart clears it. */
+    private volatile boolean restartSuppressed;
+    /** Handler used to space out automatic restarts off the boot thread. */
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    /** Last lines of harness output, kept for the post-mortem report. */
+    private final java.util.ArrayDeque<String> recentOutput = new java.util.ArrayDeque<>();
+    /** Opened while the harness runs; null between starts. */
+    private volatile PrintWriter harnessLog;
 
     @Override
     public void onCreate() {
@@ -108,7 +144,14 @@ public final class DshService extends Service {
         }
         if (intent != null && ACTION_DO_RESTART.equals(intent.getAction())) {
             startForeground(NOTIFICATION_ID, buildNotification("正在重启服务…"));
-            restartHarness();
+            restartSuppressed = false;
+            bootFailures = 0;
+            File dir = runtimeDir;
+            if (dir != null && process != null) {
+                restartHarness();
+            } else {
+                startBoot();
+            }
             return START_STICKY;
         }
         if (intent != null && ACTION_DO_RESTORE.equals(intent.getAction())) {
@@ -127,17 +170,68 @@ public final class DshService extends Service {
             broadcast(ACTION_READY, EXTRA_URL, known);
             return START_STICKY;
         }
-        if (worker == null) {
-            worker = new Thread(this::bootRuntime, "dsh-runtime");
-            worker.start();
+        if (worker == null || !worker.isAlive()) {
+            startBoot();
         }
         return START_STICKY;
     }
 
+    /**
+     * Start the boot thread unless one is already running.
+     *
+     * <p>Resets the timeline so the report describes this start, not an earlier one.</p>
+     */
+    private void startBoot() {
+        if (worker != null && worker.isAlive()) {
+            return;
+        }
+        resetTimeline("service start");
+        worker = new Thread(this::bootRuntime, "dsh-runtime");
+        worker.start();
+    }
+
+    /**
+     * Copy the boot-time node hooks into app storage so the container can import them.
+     *
+     * @return directory bound at /root/.dshboot, or null when it cannot be prepared
+     */
+    private File prepareBootFiles() {
+        File dir = new File(getFilesDir(), "boot");
+        if (!dir.isDirectory() && !dir.mkdirs()) {
+            Log.w(TAG, "cannot create " + dir);
+            return null;
+        }
+        File loader = new File(dir, "res-hooks.mjs");
+        try (java.io.InputStream in = getAssets().open("boot/res-hooks.mjs");
+             FileOutputStream out = new FileOutputStream(loader)) {
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = in.read(buffer)) > 0) {
+                out.write(buffer, 0, read);
+            }
+        } catch (IOException error) {
+            Log.w(TAG, "cannot prepare " + loader, error);
+            return null;
+        }
+        return dir;
+    }
+
+    /**
+     * Start a fresh timeline for a new attempt.
+     *
+     * @param first stage label for the attempt itself
+     */
+    private void resetTimeline(String first) {
+        bootStartedAt = SystemClock.elapsedRealtime();
+        synchronized (bootStages) {
+            bootStages.clear();
+        }
+        stage(first);
+    }
+
     /** Unpack the runtime (first run only), start the server and publish its URL. */
     private void bootRuntime() {
-        long started = System.currentTimeMillis();
-        bootStartedAt = started;
+        long started = SystemClock.elapsedRealtime();
         try {
             safetyNet = new SafetyNet(getFilesDir());
             File runtime = RuntimeInstaller.install(this, (percent, stage) -> {
@@ -149,13 +243,16 @@ public final class DshService extends Service {
                 runtime = RuntimeInstaller.reinstall(this, (percent, stage) ->
                         updateNotification(stage + " " + percent + "%"));
             }
-            Log.i(TAG, "runtime ready in " + (System.currentTimeMillis() - started) + "ms");
+            Log.i(TAG, "runtime ready in " + (SystemClock.elapsedRealtime() - started) + "ms");
+            stage("runtime ready");
             runtimeDir = runtime;
             // Seed the bundled plugin before SafetyNet snapshots the profile, so the copy it
             // records as "good" already contains the plugin.
             PluginSeed.install(this, runtime);
+            stage("plugin seed");
             boolean previousBootFailed = safetyNet.beginBoot();
             startControlServer();
+            stage("control server");
             startServer(runtime);
             if (currentUrl == null && safetyNet.hasGood()) {
                 // Rolling back discards whatever the agent edited, so it needs a human decision.
@@ -168,7 +265,9 @@ public final class DshService extends Service {
             }
             Log.e(TAG, "runtime boot failed", error);
             broadcast(ACTION_FAILED, EXTRA_ERROR, String.valueOf(error.getMessage()));
-            updateNotification("启动失败");
+            stage("boot failed: " + error.getMessage());
+            persistTimeline();
+            scheduleRestart("boot failed");
         }
     }
 
@@ -200,10 +299,24 @@ public final class DshService extends Service {
         command.add("-b");
         command.add("/sys");
         UserData data = UserData.prepare(this);
+        sharedDirs = data;
         command.add("-b");
         command.add(data.work.getAbsolutePath() + ":/root/work");
-        publishDocs(data);
-        publishHome(data);
+        // Keep the V8 compile cache across runtime image swaps: an image update replaces the
+        // whole runtime directory, so a cache inside it would be thrown away every upgrade.
+        File compileCache = new File(getFilesDir(), "node-compile");
+        if (compileCache.isDirectory() || compileCache.mkdirs()) {
+            command.add("-b");
+            command.add(compileCache.getAbsolutePath() + ":/root/.cache/node-compile");
+        }
+        // Resolution cache: the first boot records every (specifier, parent) pair, later boots
+        // replay it instead of walking the file system again, which is the dominant cost of a
+        // cold start under proot.
+        File bootDir = prepareBootFiles();
+        if (bootDir != null) {
+            command.add("-b");
+            command.add(bootDir.getAbsolutePath() + ":/root/.dshboot");
+        }
         command.add("-w");
         command.add("/root/work");
         command.add("/usr/bin/env");
@@ -214,9 +327,12 @@ public final class DshService extends Service {
         command.add("LANG=C.UTF-8");
         // Cache V8 bytecode: module compilation repeats on every cold start otherwise.
         command.add("NODE_COMPILE_CACHE=/root/.cache/node-compile");
-        command.add("/usr/local/bin/dsh");
+        if (bootDir != null) {
+            command.add("NODE_OPTIONS=--import /root/.dshboot/res-hooks.mjs");
+        }
         int port = pickPort();
         Log.i(TAG, "serving on 127.0.0.1:" + port);
+        command.add("/usr/local/bin/dsh");
         command.add("web");
         command.add("--no-open");
         command.add("--port");
@@ -234,8 +350,11 @@ public final class DshService extends Service {
         applyTimezone(runtime, zone);
 
         broadcast(ACTION_PROGRESS, EXTRA_PROGRESS, "正在启动服务…");
+        stage("spawning proot");
+        long spawnedAt = SystemClock.elapsedRealtime();
+        Process current;
         try {
-            process = builder.start();
+            current = builder.start();
         } catch (IOException startFailure) {
             // A swap or a partial unpack can leave the launcher briefly unreadable; verify and
             // retry once before failing the boot.
@@ -248,39 +367,324 @@ public final class DshService extends Service {
                 Thread.currentThread().interrupt();
                 throw new IOException("interrupted before retry", startFailure);
             }
-            process = builder.start();
+            current = builder.start();
         }
+        process = current;
+        Log.i(TAG, "proot spawned in " + (SystemClock.elapsedRealtime() - spawnedAt) + "ms");
         updateNotification("正在启动服务…");
 
         try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                new InputStreamReader(current.getInputStream(), StandardCharsets.UTF_8))) {
             String line;
+            boolean firstLine = true;
             while ((line = reader.readLine()) != null) {
+                if (firstLine) {
+                    firstLine = false;
+                    stage("first engine output");
+                }
                 Log.i(TAG, line);
+                recordOutput(line);
                 Matcher matcher = URL_PATTERN.matcher(line);
                 if (matcher.find() && currentUrl == null) {
-                    Log.i(TAG, "harness ready in " + (System.currentTimeMillis() - bootStartedAt) + "ms");
+                    Log.i(TAG, "harness ready in " + (SystemClock.elapsedRealtime() - bootStartedAt) + "ms");
                     currentUrl = matcher.group(1);
-                    if (safetyNet != null) {
-                        safetyNet.markGood(runtime);
-                        mirrorBackup();
-                    }
-                    updateNotification("已就绪");
-                    broadcast(ACTION_READY, EXTRA_URL, currentUrl);
+                    onReady();
                 }
             }
         }
         int status;
         try {
-            status = process.waitFor();
+            status = current.waitFor();
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             return;
         }
+        if (process != current) {
+            // A restart already replaced this process; its exit says nothing about the current one.
+            Log.i(TAG, "harness " + status + " was replaced by a restart");
+            return;
+        }
         Log.w(TAG, "harness exited with " + status);
+        persistTimeline();
+        handleHarnessExit(status);
+    }
+
+    /**
+     * Publish the URL, snapshot the profile and get the non-essential copies off the boot path.
+     *
+     * <p>Called from the reader thread the moment the harness prints its URL. The workspace
+     * export and the guide copies used to run before {@code proot} even started, where they
+     * competed with the engine for the disk and the CPU during the slowest part of the boot.</p>
+     */
+    private void onReady() {
+        stage("ready");
+        persistTimeline();
+        if (safetyNet != null && runtimeDir != null) {
+            safetyNet.markGood(runtimeDir);
+            mirrorBackup();
+        }
+        updateNotification("已就绪");
+        broadcast(ACTION_READY, EXTRA_URL, currentUrl);
+        publishAfterReady();
+    }
+
+    /**
+     * Run the copies that are useful but not needed to reach a serving harness.
+     *
+     * <p>Runs on its own thread after the URL is out, so the phone can show the UI while the
+     * shared workspace catches up.</p>
+     */
+    private void publishAfterReady() {
+        final UserData data = sharedDirs;
+        if (data == null) {
+            return;
+        }
+        Thread thread = new Thread(() -> {
+            long started = SystemClock.elapsedRealtime();
+            publishDocs(data);
+            publishHome(data);
+            Log.i(TAG, "post-ready copies in " + (SystemClock.elapsedRealtime() - started) + "ms");
+        }, "dsh-post-ready");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    /**
+     * Record a boot stage together with its offset from the start of this boot.
+     *
+     * @param name short, stable stage label
+     */
+    private void stage(String name) {
+        long offset = SystemClock.elapsedRealtime() - bootStartedAt;
+        synchronized (bootStages) {
+            bootStages.add(name + " " + offset + "ms");
+            if (bootStages.size() > TIMELINE_IN_MEMORY) {
+                bootStages.remove(0);
+            }
+        }
+        Log.i(TAG, "boot: " + name + " at " + offset + "ms");
+    }
+
+    /** Persist the timeline of the latest boot so /diag can show it after a restart. */
+    private void persistTimeline() {
+        List<String> copy;
+        synchronized (bootStages) {
+            copy = new ArrayList<>(bootStages);
+        }
+        getSharedPreferences("dsh", MODE_PRIVATE).edit()
+                .putString(PREF_BOOT_TIMELINE, String.join("\n", copy)).apply();
+    }
+
+    /**
+     * Keep the tail of the harness output on disk.
+     *
+     * <p>Output used to go to logcat only, which is gone once the process dies — exactly the case
+     * a crash report has to explain.</p>
+     *
+     * @param line one line of harness output
+     */
+    private void recordOutput(String line) {
+        synchronized (recentOutput) {
+            recentOutput.addLast(line);
+            while (recentOutput.size() > 40) {
+                recentOutput.removeFirst();
+            }
+        }
+        PrintWriter writer = harnessLog;
+        if (writer == null) {
+            File log = new File(getFilesDir(), HARNESS_LOG);
+            try {
+                if (log.length() > HARNESS_LOG_LIMIT) {
+                    java.nio.file.Files.move(log.toPath(),
+                            new File(getFilesDir(), HARNESS_LOG + ".1").toPath(),
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                }
+                writer = new PrintWriter(new FileOutputStream(log, true), true);
+                harnessLog = writer;
+            } catch (IOException error) {
+                Log.w(TAG, "cannot write harness log", error);
+                return;
+            }
+        }
+        writer.println(line);
+    }
+
+    /**
+     * Handle the harness process ending: record why, then restart unless the loop gave up.
+     *
+     * @param status exit code reported by proot
+     */
+    private void handleHarnessExit(int status) {
+        if (restarting) {
+            return;
+        }
+        long ranFor = SystemClock.elapsedRealtime() - bootStartedAt;
+        String reason = "harness exited with " + status + " after " + ranFor + "ms"
+                + (currentUrl == null ? " (never ready)" : "");
+        getSharedPreferences("dsh", MODE_PRIVATE).edit()
+                .putString(PREF_LAST_EXIT, reason + "\n" + tailOutput(6)).apply();
+        Log.w(TAG, reason);
         currentUrl = null;
-        broadcast(ACTION_FAILED, EXTRA_ERROR, "harness exited with " + status);
-        stopSelf();
+        broadcast(ACTION_FAILED, EXTRA_ERROR, "服务意外退出：" + status);
+        if (ranFor >= STABLE_BOOT_MS) {
+            bootFailures = 0;
+            firstFailureAt = 0;
+        }
+        scheduleRestart(reason);
+    }
+
+    /**
+     * Last lines of harness output, oldest first.
+     *
+     * @param count how many lines to keep
+     * @return newline-joined lines
+     */
+    private String tailOutput(int count) {
+        List<String> lines;
+        synchronized (recentOutput) {
+            lines = new ArrayList<>(recentOutput);
+        }
+        int from = Math.max(0, lines.size() - count);
+        return String.join("\n", lines.subList(from, lines.size()));
+    }
+
+    /**
+     * Restart the harness after a failure, backing off and giving up after repeated failures.
+     *
+     * @param reason short description for the log
+     */
+    private void scheduleRestart(String reason) {
+        if (restartSuppressed) {
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        if (firstFailureAt == 0 || now - firstFailureAt > FAILURE_WINDOW_MS) {
+            firstFailureAt = now;
+            bootFailures = 0;
+        }
+        bootFailures++;
+        if (bootFailures > MAX_BOOT_FAILURES) {
+            degrade(reason);
+            return;
+        }
+        long delay = 1000L << (bootFailures - 1);
+        Log.i(TAG, "restart " + bootFailures + "/" + MAX_BOOT_FAILURES + " in " + delay + "ms");
+        final File dir = runtimeDir;
+        if (dir == null) {
+            // The failure happened before the runtime was unpacked; the next attempt has to
+            // redo the setup steps, not just respawn the harness.
+            mainHandler.postDelayed(() -> {
+                if (!restartSuppressed && process == null) {
+                    startBoot();
+                }
+            }, delay);
+            return;
+        }
+        mainHandler.postDelayed(() -> {
+            if (restartSuppressed || process != null) {
+                return;
+            }
+            Thread thread = new Thread(() -> {
+                try {
+                    currentUrl = null;
+                    resetTimeline("auto restart");
+                    startServer(dir);
+                } catch (IOException error) {
+                    Log.e(TAG, "restart failed", error);
+                    scheduleRestart("restart failed: " + error.getMessage());
+                }
+            }, "dsh-restart");
+            thread.setDaemon(true);
+            thread.start();
+        }, delay);
+    }
+
+    /**
+     * Stop the automatic restart loop and leave the user a way back in.
+     *
+     * @param reason why the loop stopped
+     */
+    private void degrade(String reason) {
+        restartSuppressed = true;
+        Log.e(TAG, "giving up after " + bootFailures + " failures: " + reason);
+        Intent retry = new Intent(this, DshService.class).setAction(ACTION_DO_RESTART);
+        android.app.PendingIntent pending = android.app.PendingIntent.getService(
+                this, 2, retry,
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT | android.app.PendingIntent.FLAG_IMMUTABLE);
+        android.app.NotificationManager manager =
+                (android.app.NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        if (manager != null) {
+            android.app.Notification note = new Notification.Builder(this, CHANNEL_ID)
+                    .setContentTitle("DeepSeek Harness 已停止")
+                    .setContentText("服务反复退出（" + reason + "）。点按重试。")
+                    .setSmallIcon(android.R.drawable.stat_notify_error)
+                    .setContentIntent(pending)
+                    .setAutoCancel(true)
+                    .build();
+            manager.notify(NOTIFICATION_ID + 2, note);
+        }
+        if (wakeLock != null && wakeLock.isHeld()) {
+            wakeLock.release();
+        }
+    }
+
+    /** Close the rotating harness log; null is fine. */
+    private void closeHarnessLog() {
+        PrintWriter writer = harnessLog;
+        harnessLog = null;
+        if (writer != null) {
+            writer.close();
+        }
+    }
+
+    /**
+     * Post-mortem snapshot for the control panel: boot timeline, last exit, recent output.
+     *
+     * @return JSON body
+     */
+    private String diagReport() {
+        String timeline = getSharedPreferences("dsh", MODE_PRIVATE).getString(PREF_BOOT_TIMELINE, "");
+        String lastExit = getSharedPreferences("dsh", MODE_PRIVATE).getString(PREF_LAST_EXIT, "");
+        String output = tailOutput(40);
+        return "{\"timeline\":\"" + escape(timeline) + "\",\"last_exit\":\"" + escape(lastExit)
+                + "\",\"output\":\"" + escape(output) + "\"}";
+    }
+
+    /**
+     * Escape a string for a JSON string literal.
+     *
+     * @param text raw text
+     * @return escaped text without the surrounding quotes
+     */
+    private static String escape(String text) {
+        StringBuilder out = new StringBuilder(text.length() + 16);
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            switch (c) {
+                case '"':
+                    out.append("\\\"");
+                    break;
+                case '\\':
+                    out.append("\\\\");
+                    break;
+                case '\n':
+                    out.append("\\n");
+                    break;
+                case '\r':
+                    out.append("\\r");
+                    break;
+                case '\t':
+                    out.append("\\t");
+                    break;
+                default:
+                    if (c < 0x20) {
+                        out.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        out.append(c);
+                    }
+            }
+        }
+        return out.toString();
     }
 
     /**
@@ -367,6 +771,8 @@ public final class DshService extends Service {
             }
             body = "{\"slots\":[" + slots + "],\"last-good\":"
                     + (safetyNet != null && safetyNet.hasGood()) + "}";
+        } else if ("/diag".equals(route)) {
+            body = diagReport();
         } else if ("/update/auto".equals(route)) {
             if ("POST".equals(method)) {
                 boolean enabled = !query.contains("enabled=false");
@@ -456,15 +862,16 @@ public final class DshService extends Service {
             restarting = true;
             Log.i(TAG, "restart requested");
             stopHarness();
+            restarting = false;
             Log.i(TAG, "old harness stopped");
             currentUrl = null;
+            resetTimeline("manual restart");
             try {
                 startServer(dir);
             } catch (IOException error) {
                 Log.e(TAG, "restart failed", error);
                 broadcast(ACTION_FAILED, EXTRA_ERROR, String.valueOf(error.getMessage()));
-            } finally {
-                restarting = false;
+                scheduleRestart("restart failed: " + error.getMessage());
             }
         }, "dsh-restart");
         thread.start();
@@ -846,6 +1253,8 @@ public final class DshService extends Service {
     @Override
     public void onDestroy() {
         currentUrl = null;
+        mainHandler.removeCallbacksAndMessages(null);
+        closeHarnessLog();
         stopHarness();
         if (wakeLock != null && wakeLock.isHeld()) {
             wakeLock.release();

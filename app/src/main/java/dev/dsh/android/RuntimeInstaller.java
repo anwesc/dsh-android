@@ -123,6 +123,12 @@ final class RuntimeInstaller {
         try (java.io.FileWriter writer = new java.io.FileWriter(marker)) {
             writer.write(LAYOUT_VERSION);
         }
+        // The new image changes module paths; a resolution cache recorded against the old one
+        // would point at files that no longer exist.
+        File resolveCache = new File(context.getFilesDir(), "boot/res-cache.jsonl");
+        if (resolveCache.isFile() && !resolveCache.delete()) {
+            Log.w(TAG, "cannot clear " + resolveCache);
+        }
         report(progress, 100, "runtime ready");
         return runtime;
     }
