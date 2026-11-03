@@ -11,6 +11,7 @@ public final class ControlActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        ControlPanel.show(this, text -> Toast.makeText(this, text, Toast.LENGTH_SHORT).show());
+        ControlPanel.show(this, text -> runOnUiThread(
+                () -> Toast.makeText(this, text, Toast.LENGTH_SHORT).show()));
     }
 }

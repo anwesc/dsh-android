@@ -62,6 +62,11 @@ final class DshHomeExporter {
 
             @Override
             public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                String name = file.getFileName() == null ? "" : file.getFileName().toString();
+                if (".control-token".equals(name) || ".credentials.yaml".equals(name)) {
+                    // Local secrets: the export lands on shared storage, so leave them in place.
+                    return FileVisitResult.CONTINUE;
+                }
                 Path target = to.resolve(from.relativize(file).toString());
                 if (Files.isSymbolicLink(file)) {
                     Files.deleteIfExists(target);

@@ -161,6 +161,16 @@ curl -s -X POST http://127.0.0.1:3081/restart
 | 导出家目录 | `POST /export` |
 | 备份当前配置 / 回滚 | `POST /backup`、`POST /restore` |
 
+控制口只监听 `127.0.0.1:3081`，但所有请求都要带 `X-Dsh-Token`（本机任意 App 都能连 localhost，所以加了一层校验）。token 每次安装首次启动时随机生成，存在 App 私有配置里，同时写到容器内 `/root/.dsh/.control-token`，方便 AI 自己读：
+
+```bash
+TOKEN=$(cat /root/.dsh/.control-token)
+curl -s -H "X-Dsh-Token: $TOKEN" http://127.0.0.1:3081/diag
+curl -s -X POST -H "X-Dsh-Token: $TOKEN" "http://127.0.0.1:3081/restart?delay=5"
+```
+
+`/restart` 会把容器连同当前会话一起重启，`delay` 是给 AI 留的「先把回复说完」的缓冲（0–120 秒，默认 0 立即重启）。控制面板里的「重启服务」「刷新页面」按钮走的是 Intent，不受影响。
+
 ## CI 出包
 
 `.github/workflows/release.yml`：打 `v*` tag 时自动下载运行时镜像、签名并附加 APK 到 Release。

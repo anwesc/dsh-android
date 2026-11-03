@@ -27,6 +27,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Matcher;
+import java.util.UUID;
 import java.util.regex.Pattern;
 
 /**
@@ -61,6 +62,8 @@ public final class DshService extends Service {
     static final String ACTION_DO_RESTART = "dev.dsh.android.action.DO_RESTART";
     /** Preference storing whether the app checks for updates on its own. */
     private static final String PREF_AUTO_UPDATE = "auto_update";
+    /** Preference mirroring the loopback control token for in-app callers. */
+    private static final String PREF_CONTROL_TOKEN = "control_token";
     /** Loopback control port for restart/reload requests from inside the container. */
     private static final int CONTROL_PORT = 3081;
     /** Intent extra holding the progress line. */
@@ -76,6 +79,9 @@ public final class DshService extends Service {
 
     /** Latest harness URL, shared with a re-created activity. */
     static volatile String currentUrl;
+
+    /** Random token required by the loopback control port; regenerated per process. */
+    private volatile String controlToken;
 
     /** Preference holding the boot timeline of the most recent start, one stage per line. */
     private static final String PREF_BOOT_TIMELINE = "boot_timeline";
@@ -136,6 +142,13 @@ public final class DshService extends Service {
     public void onCreate() {
         super.onCreate();
         createChannel();
+        controlToken = getSharedPreferences("dsh", MODE_PRIVATE)
+                .getString(PREF_CONTROL_TOKEN, null);
+        if (controlToken == null || controlToken.isEmpty()) {
+            controlToken = UUID.randomUUID().toString().replace("-", "");
+            getSharedPreferences("dsh", MODE_PRIVATE).edit()
+                    .putString(PREF_CONTROL_TOKEN, controlToken).apply();
+        }
         // No wake lock here: the service is started at boot and usually idles. It is held only
         // while a boot/restart is in flight and for a short window after each request.
         touchActivity();
@@ -478,6 +491,7 @@ public final class DshService extends Service {
         File proot = new File(runtime, "bin/proot");
         File lib = new File(runtime, "lib");
         File rootfs = new File(runtime, "rootfs");
+        publishControlToken(rootfs);
 
         List<String> command = new ArrayList<>();
         command.add(proot.getAbsolutePath());
@@ -1213,6 +1227,8 @@ public final class DshService extends Service {
                         handleControl(socket);
                     } catch (IOException error) {
                         Log.w(TAG, "control request failed", error);
+                    } catch (RuntimeException error) {
+                        Log.w(TAG, "control request crashed", error);
                     }
                 }
             } catch (IOException error) {
@@ -1240,9 +1256,22 @@ public final class DshService extends Service {
         int mark = path.indexOf('?');
         String route = mark < 0 ? path : path.substring(0, mark);
         String query = mark < 0 ? "" : path.substring(mark + 1);
+        String tokenHeader = null;
+        String header;
+        while ((header = reader.readLine()) != null && !header.isEmpty()) {
+            int colon = header.indexOf(':');
+            if (colon > 0 && "X-Dsh-Token".equalsIgnoreCase(header.substring(0, colon).trim())) {
+                tokenHeader = header.substring(colon + 1).trim();
+                break;
+            }
+        }
+        int status = 200;
         touchActivity();
 
-        if ("GET".equals(method) && "/".equals(route)) {
+        if (!controlTokenOk(tokenHeader)) {
+            status = 403;
+            body = "{\"error\":\"unauthorized\"}";
+        } else if ("GET".equals(method) && "/".equals(route)) {
             String url = currentUrl;
             body = "{\"url\":\"" + (url == null ? "" : url) + "\"}";
         } else if ("/backups".equals(route)) {
@@ -1339,8 +1368,23 @@ public final class DshService extends Service {
             publishHome(null);
             body = "{\"status\":\"exporting\"}";
         } else if ("/restart".equals(route)) {
-            restartHarness();
-            body = "{\"status\":\"restarting\"}";
+            int delay = 0;
+            String raw = queryValue(query, "delay");
+            if (!raw.isEmpty()) {
+                try {
+                    delay = Math.max(0, Math.min(120, Integer.parseInt(raw)));
+                } catch (NumberFormatException ignored) {
+                    delay = 0;
+                }
+            }
+            if (delay > 0) {
+                Log.i(TAG, "restart scheduled in " + delay + "s");
+                mainHandler.postDelayed(this::restartHarness, delay * 1000L);
+                body = "{\"status\":\"scheduled\",\"delay\":" + delay + "}";
+            } else {
+                restartHarness();
+                body = "{\"status\":\"restarting\"}";
+            }
         } else if ("/reload".equals(route)) {
             broadcast(ACTION_RELOAD, EXTRA_PROGRESS, "");
             body = "{\"status\":\"reloading\"}";
@@ -1351,10 +1395,31 @@ public final class DshService extends Service {
 
         byte[] payload = body.getBytes(StandardCharsets.UTF_8);
         OutputStream out = socket.getOutputStream();
-        out.write(("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+        String statusLine = status == 200 ? "HTTP/1.1 200 OK" : "HTTP/1.1 403 Forbidden";
+        out.write((statusLine + "\r\nContent-Type: application/json\r\nContent-Length: "
                 + payload.length + "\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.UTF_8));
         out.write(payload);
         out.flush();
+    }
+
+    /** Publish the control token inside the container so its shell can call the port. */
+    private void publishControlToken(File rootfs) {
+        File home = new File(rootfs, "root/.dsh");
+        if (!home.isDirectory()) {
+            Log.w(TAG, "cannot publish control token: no " + home);
+            return;
+        }
+        try (FileOutputStream out = new FileOutputStream(new File(home, ".control-token"))) {
+            out.write(controlToken.getBytes(StandardCharsets.UTF_8));
+        } catch (IOException error) {
+            Log.w(TAG, "cannot publish control token", error);
+        }
+    }
+
+    /** True when the caller presented the current control token. */
+    private boolean controlTokenOk(String presented) {
+        String expected = controlToken;
+        return expected != null && !expected.isEmpty() && expected.equals(presented);
     }
 
     /** Stop the current harness process and start it again, publishing a fresh URL. */

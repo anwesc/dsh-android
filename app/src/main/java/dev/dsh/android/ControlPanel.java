@@ -118,7 +118,7 @@ final class ControlPanel {
         diag.setOnClickListener(view -> {
             diagText.setText("查看启动耗时与上次退出 · 读取中…");
             Thread worker = new Thread(() -> {
-                String body = post("/diag");
+                String body = post(context, "/diag");
                 view.post(() -> {
                     diagText.setText("查看启动耗时与上次退出");
                     Dialogs.choice(context, "启动诊断", readable(body), "知道了", () -> {}, null);
@@ -215,8 +215,9 @@ final class ControlPanel {
                 return;
             }
             Thread worker = new Thread(() -> {
-                String body = post(path);
-                reporter.report(label + "：" + explain(path, body));
+                String body = post(context, path);
+                String message = label + "：" + explain(path, body);
+                view.post(() -> reporter.report(message));
                 view.post(() -> {
                     row.setEnabled(true);
                     text.setText(label);
@@ -244,7 +245,7 @@ final class ControlPanel {
      */
     private static void showBackups(android.content.Context context, float density, Reporter reporter) {
         Thread worker = new Thread(() -> {
-            String body = post("/backups");
+            String body = post(context, "/backups");
             java.util.List<String> slots = new java.util.ArrayList<>();
             int at = body.indexOf("[");
             int end = body.indexOf("]");
@@ -266,7 +267,7 @@ final class ControlPanel {
                 Dialogs.list(activity, "选择要回滚的备份", labels, which -> {
                     String slot = labels[which];
                     Thread restore = new Thread(() -> {
-                        String result = post("/restore?slot=" + slot);
+                        String result = post(context, "/restore?slot=" + slot);
                         reporter.report("回滚 " + slot + "：" + explain("/restore", result));
                     }, "dsh-restore");
                     restore.setDaemon(true);
@@ -394,11 +395,14 @@ final class ControlPanel {
         return json.substring(start, end).trim();
     }
 
-    private static String post(String path) {
+    private static String post(android.content.Context context, String path) {
         HttpURLConnection connection = null;
         try {
             connection = (HttpURLConnection) new URL("http://127.0.0.1:3081" + path).openConnection();
             connection.setRequestMethod("POST");
+            connection.setRequestProperty("X-Dsh-Token", context
+                    .getSharedPreferences("dsh", android.content.Context.MODE_PRIVATE)
+                    .getString("control_token", ""));
             connection.setConnectTimeout(3000);
             connection.setReadTimeout(5000);
             int code = connection.getResponseCode();
