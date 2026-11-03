@@ -188,7 +188,8 @@ git push origin refs/tags/v1.0.6   # --follow-tags 不会推轻量标签
 ```
 
 镜像更新时：把新镜像传到 `runtime-vN` Release，并同时改 `RuntimeInstaller.LAYOUT_VERSION`
-和 workflow 里的 `RUNTIME_TAG`/`RUNTIME_SHA256`。
+和 workflow 里的 `RUNTIME_TAG`/`RUNTIME_SHA256`。换 Node/dsh 版本前先过一遍
+[docs/UPGRADE.md](docs/UPGRADE.md) 的硬依赖与冒烟清单。
 
 
 ### 为什么用 lint 而不是模拟器冒烟
