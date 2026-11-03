@@ -32,9 +32,9 @@ final class RuntimeInstaller {
     /** Gzip-compressed tar of the arm64 rootfs; the extension avoids aapt2's .gz rewriting. */
     private static final String ROOTFS_ASSET = "rootfs.bin";
     /** Entry count of {@link #ROOTFS_ASSET}, used for unpack progress. */
-    private static final int ROOTFS_ENTRIES = 86964;
+    private static final int ROOTFS_ENTRIES = 62509;
     /** Layout version; bump when the extracted tree gains or loses files. */
-    private static final String LAYOUT_VERSION = "9";
+    private static final String LAYOUT_VERSION = "10";
 
     /** Receives coarse unpack progress for the notification and the loading screen. */
     interface Progress {

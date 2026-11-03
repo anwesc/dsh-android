@@ -12,7 +12,7 @@ https://github.com/anwesc/dsh-android/releases/download/v1.0.6/dsh-1.0.6-release
 ```
 
 - **只能侧载**（文件管理器点开安装 / `adb install -r dsh-1.0.1-release.apk`），无法上架 Google Play。
-- 首次启动解压约 20 秒（1.2 GB 运行时），之后冷启动约 20 秒；服务常驻时打开即用。
+- 首次启动解压约 30 秒（约 1 GB 运行时），之后冷启动约 8 秒；服务常驻时打开即用。
 - 小米/HyperOS 用 adb 安装新签名包时若报 `INSTALL_FAILED_USER_RESTRICTED`，
   需在开发者选项里打开「USB 安装」，或直接在手机上点 APK 安装。
 - Android 16 上 adb 安装大包前建议先 `adb shell input keyevent KEYCODE_WAKEUP`，锁屏状态下会被自动拒绝。
@@ -65,19 +65,21 @@ export JAVA_HOME="/path/to/Android Studio/jbr"   # JDK 21
 
 ## 重新生成运行时镜像
 
-`rootfs.bin` 有 300+ MB，不放在 Git 里。生成步骤（需要一个 Linux arm64 环境，Termux + proot-distro 亦可）：
+`rootfs.bin` 约 260 MB，不放在 Git 里。生成步骤（需要一个 Linux arm64 环境，Termux + proot-distro 亦可）：
 
 1. 准备 Ubuntu 24.04 arm64 rootfs，安装 Node 24 到 `/opt/nodejs`，`npm i -g pnpm@11 @deepseek-ai/dsh`；
 2. 确保 web profile 的 `.npmrc` 指向可达的 npm 源（国内用 `https://registry.npmmirror.com`）；
 3. 清理缓存后打包：
 
 ```bash
-tar --hard-dereference -cf - -C <rootfs> . | gzip -1 > rootfs.bin
+scripts/pack-runtime.sh <rootfs>
 ```
 
-4. 放到 `app/src/main/assets/rootfs.bin`，把 `RuntimeInstaller.LAYOUT_VERSION` 加 1（触发老用户重新解压）。
+脚本会先做无损裁剪（`.d.ts`、source map、tests/docs、其他平台预编译产物），再用
+`gzip -9` 打包；`PRUNE=0` 可跳过裁剪。`--hard-dereference` 是必需的：Android
+禁止应用创建硬链接，镜像里的硬链接必须展开成实体文件。
 
-`--hard-dereference` 是必需的：Android 禁止应用创建硬链接，镜像里的硬链接必须展开成实体文件。
+4. 脚本默认写到 `app/src/main/assets/rootfs.bin`；把 `RuntimeInstaller.LAYOUT_VERSION` 加 1（触发老用户重新解压）。
 
 ## 签名与发布
 
@@ -210,7 +212,7 @@ GITHUB_TOKEN=ghp_xxx scripts/publish-runtime.sh --update-workflow
 加 `--dry-run` 只打印计划；`--tag`、`--repo`、`--draft` 可覆盖默认值。
 ## 已知限制
 
-- **APK ~350 MB**，首次安装解压约 20 s，之后冷启动约 20 s（proot 下模块解析的 stat 开销）。
+- **APK ~255 MB**，首次安装解压约 30 s，之后冷启动约 8 s（首次启动会把模块解析结果缓存下来，后续启动直接命中，绕过 proot 下昂贵的 stat/realpath）。
 - **签名**：分发包由 CI 用 `KEYSTORE_BASE64` 等 secrets 签名；本地没有 `keystore.properties` 时 `assembleRelease` 会退回 debug 签名，只能自己装，不能覆盖正式版。
 - **登录**：OAuth 页面由系统浏览器打开（WebView 里渲染不出来），授权回调打回 `127.0.0.1:3080`。
 - **插件**：不内置；通过「设置 → 插件 → 添加插件」安装，profile 随镜像升级迁移而保留。

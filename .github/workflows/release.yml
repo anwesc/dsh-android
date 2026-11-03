@@ -11,8 +11,8 @@ permissions:
   contents: write
 
 env:
-  RUNTIME_TAG: runtime-v9
-  RUNTIME_SHA256: bb01ced5cd83682300c56420234bce174a7de1a30d3bf6db4a5a42b3322a4468
+  RUNTIME_TAG: runtime-v10
+  RUNTIME_SHA256: 93c13e3ecbafc81336a4bd28fde014df6a38c6d153f523cc93eeee3a0bb613ad
 
 jobs:
   release:

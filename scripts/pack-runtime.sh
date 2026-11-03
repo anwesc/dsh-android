@@ -14,8 +14,22 @@ set -eu
 
 rootfs=${1:?usage: pack-runtime.sh <rootfs-dir> [output]}
 output=${2:-app/src/main/assets/rootfs.bin}
+prune=${PRUNE:-1}
 
 test -d "$rootfs" || { echo "not a directory: $rootfs" >&2; exit 1; }
 
-tar --hard-dereference -cf - -C "$rootfs" . | gzip -1 > "$output"
+# Lossless prune: nothing here is read at runtime, but it removes ~15% of the
+# unpacked tree (type declarations, source maps, docs, tests, other platforms).
+if [ "$prune" = 1 ]; then
+  echo "pruning $rootfs"
+  find "$rootfs" -type f \( -name '*.d.ts' -o -name '*.map' \
+    -o -name '*.pdb' \) -delete
+  find "$rootfs" -depth -type d \( -name test -o -name tests \
+    -o -name __tests__ -o -name docs \) -exec rm -rf {} +
+  find "$rootfs" -depth -type d \( -name 'win32-*' -o -name 'darwin-*' \) \
+    -exec rm -rf {} +
+fi
+
+# gzip -9 costs a minute at build time and saves ~15% of the download.
+tar --hard-dereference -cf - -C "$rootfs" . | gzip -9 > "$output"
 ls -l "$output"
