@@ -22,8 +22,8 @@ android {
         minSdk = 26
         // targetSdk 28 is required so the app may exec binaries shipped in its own data directory.
         targetSdk = 28
-        versionCode = 25
-        versionName = "1.0.8"
+        versionCode = 26
+        versionName = "1.0.9"
     }
 
     signingConfigs {
