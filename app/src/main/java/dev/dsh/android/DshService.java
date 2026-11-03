@@ -514,6 +514,13 @@ public final class DshService extends Service {
             command.add("-b");
             command.add(bootDir.getAbsolutePath() + ":/root/.dshboot");
         }
+        // The image ships public resolvers, which cannot see hosts on a private network
+        // (corporate proxies, LAN model servers); mirror the phone's current DNS instead.
+        File resolv = prepareResolvConf();
+        if (resolv != null) {
+            command.add("-b");
+            command.add(resolv.getAbsolutePath() + ":/etc/resolv.conf");
+        }
         command.add("-w");
         command.add("/root/work");
         command.add("/usr/bin/env");
@@ -853,6 +860,281 @@ public final class DshService extends Service {
                 + "\",\"output\":\"" + escape(output) + "\"}";
     }
 
+    /** The tail of the harness stdout/stderr, for remote debugging (`GET /log`). */
+    private String logTailReport() {
+        File log = new File(getFilesDir(), HARNESS_LOG);
+        if (!log.isFile()) {
+            return "{\"size\":0,\"log\":\"\"}";
+        }
+        long size = log.length();
+        long from = Math.max(0, size - 96L * 1024L);
+        StringBuilder text = new StringBuilder();
+        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(log, "r")) {
+            raf.seek(from);
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = raf.read(buffer)) > 0) {
+                text.append(new String(buffer, 0, read, StandardCharsets.UTF_8));
+            }
+        } catch (IOException failure) {
+            return "{\"size\":" + size + ",\"error\":\"" + escape(failure.toString()) + "\"}";
+        }
+        return "{\"size\":" + size + ",\"log\":\"" + escape(text.toString()) + "\"}";
+    }
+
+    /** Probe the configured model endpoint with the stored key (`GET /net`). */
+    private String netReport() {
+        File home = new File(runtimeDir, "rootfs/root/.dsh");
+        String key = readCredential(new File(home, ".credentials.yaml"), "DEEPSEEK_API_KEY");
+        String baseURL = "https://api.deepseek.com";
+        File patch = new File(home, "profiles/web/cordis.patch.yml");
+        if (patch.isFile()) {
+            for (String line : readLines(patch)) {
+                String t = line.trim();
+                if (t.startsWith("baseURL:")) {
+                    baseURL = t.substring("baseURL:".length()).trim().replace("\"", "").replace("'", "");
+                }
+            }
+        }
+        String root = baseURL.replaceAll("/+$", "");
+        if (!root.endsWith("/v1")) {
+            root = root + "/v1";
+        }
+        StringBuilder out = new StringBuilder("{");
+        out.append("\"base\":\"").append(escape(baseURL)).append("\",\"key_len\":").append(key.length());
+        out.append(",\"dns\":\"").append(escape(dns(baseURL))).append("\"");
+        String messages = "{\"model\":\"deepseek-flash\",\"max_tokens\":16,\"stream\":true,"
+                + "\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
+        out.append(",\"messages\":").append(postJson(root + "/messages", messages, key,
+                "x-api-key", "anthropic-version: 2023-06-01"));
+        String chat = "{\"model\":\"deepseek-flash\",\"max_tokens\":16,"
+                + "\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
+        out.append(",\"chat\":").append(postJson(root + "/chat/completions", chat, key,
+                "Authorization", null));
+        out.append(",\"container\":").append(containerNet(runtimeDir, root + "/messages", key));
+        out.append("}");
+        return out.toString();
+    }
+
+    /**
+     * Ask the container to fetch a URL, so DNS and TLS inside proot can be checked directly.
+     *
+     * @param runtime unpacked runtime directory
+     * @param url endpoint to fetch
+     * @return JSON with the exit state and captured output
+     */
+    private String containerNet(File runtime, String url, String key) {
+        try {
+            File proot = new File(runtime, "bin/proot");
+            File rootfs = new File(runtime, "rootfs");
+            List<String> command = new ArrayList<>();
+            command.add(proot.getAbsolutePath());
+            command.add("--link2symlink");
+            command.add("--kill-on-exit");
+            command.add("-0");
+            command.add("-r");
+            command.add(rootfs.getAbsolutePath());
+            command.add("-b");
+            command.add("/dev");
+            command.add("-b");
+            command.add("/proc");
+            command.add("-b");
+            command.add("/sys");
+            UserData data = UserData.prepare(this);
+            command.add("-b");
+            command.add(data.work.getAbsolutePath() + ":/root/work");
+            File resolv = prepareResolvConf();
+            if (resolv != null) {
+                command.add("-b");
+                command.add(resolv.getAbsolutePath() + ":/etc/resolv.conf");
+            }
+            command.add("-w");
+            command.add("/root/work");
+            command.add("/usr/bin/env");
+            command.add("-i");
+            command.add("HOME=/root");
+            command.add("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+            command.add("/usr/local/bin/node");
+            command.add("-e");
+            command.add("const u=process.argv[1],k=process.argv[2];"
+                    + "const o={method:'POST',headers:{'x-api-key':k,'anthropic-version':'2023-06-01',"
+                    + "'content-type':'application/json'},body:JSON.stringify({model:'deepseek-flash',"
+                    + "max_tokens:8,messages:[{role:'user',content:'hi'}]})};"
+                    + "fetch(u,o).then(r=>r.text().then(t=>console.log('CONTAINER_OK',r.status,t.slice(0,60))))"
+                    + ".catch(e=>console.log('CONTAINER_FAIL',String(e&&(e.cause&&e.cause.code||e.code)||e)));");
+            command.add(url);
+            command.add(key);
+            ProcessBuilder builder = new ProcessBuilder(command);
+            builder.directory(runtime);
+            builder.redirectErrorStream(true);
+            builder.environment().put("LD_LIBRARY_PATH", new File(runtime, "lib").getAbsolutePath());
+            builder.environment().put("PROOT_LOADER",
+                    new File(runtime, "libexec/proot/loader").getAbsolutePath());
+            builder.environment().put("PROOT_TMP_DIR", getCacheDir().getAbsolutePath());
+            Process probe = builder.start();
+            StringBuffer text = new StringBuffer();
+            Thread reader = new Thread(() -> {
+                try (BufferedReader stream = new BufferedReader(new InputStreamReader(
+                        probe.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = stream.readLine()) != null && text.length() < 2000) {
+                        text.append(line).append('\n');
+                    }
+                } catch (IOException ignored) {
+                    // best effort
+                }
+            }, "dsh-net-probe");
+            reader.setDaemon(true);
+            reader.start();
+            boolean done = probe.waitFor(25, java.util.concurrent.TimeUnit.SECONDS);
+            if (!done) {
+                probe.destroyForcibly();
+            }
+            reader.join(1500);
+            return "{\"done\":" + done + ",\"out\":\"" + escape(text.toString()) + "\"}";
+        } catch (Exception failure) {
+            return "{\"error\":\"" + escape(failure.toString()) + "\"}";
+        }
+    }
+
+    /**
+     * Mirror the phone's DNS servers into a file the container can mount at /etc/resolv.conf.
+     * The image ships public resolvers, which cannot resolve hosts on a private network.
+     *
+     * @return the generated file, or null when no server is known
+     */
+    private File prepareResolvConf() {
+        java.util.LinkedHashSet<String> servers = new java.util.LinkedHashSet<>();
+        try {
+            android.net.ConnectivityManager manager =
+                    (android.net.ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (manager != null) {
+                for (android.net.Network network : manager.getAllNetworks()) {
+                    android.net.LinkProperties props = manager.getLinkProperties(network);
+                    if (props == null) {
+                        continue;
+                    }
+                    for (java.net.InetAddress dns : props.getDnsServers()) {
+                        String host = dns.getHostAddress();
+                        if (host != null && !host.isEmpty()) {
+                            servers.add(host);
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // fall back to the image resolvers
+        }
+        if (servers.isEmpty()) {
+            return null;
+        }
+        File file = new File(getFilesDir(), "resolv.conf");
+        StringBuilder text = new StringBuilder();
+        for (String server : servers) {
+            text.append("nameserver ").append(server).append('\n');
+        }
+        try (FileOutputStream out = new FileOutputStream(file)) {
+            out.write(text.toString().getBytes(StandardCharsets.UTF_8));
+        } catch (IOException failure) {
+            Log.w(TAG, "cannot write resolv.conf", failure);
+            return null;
+        }
+        return file;
+    }
+
+    private static String dns(String baseURL) {
+        try {
+            return InetAddress.getByName(new java.net.URL(baseURL).getHost()).getHostAddress();
+        } catch (Exception failure) {
+            return "FAIL " + failure;
+        }
+    }
+
+    private static String readCredential(File file, String name) {
+        for (String line : readLines(file)) {
+            int colon = line.indexOf(':');
+            if (colon > 0 && line.substring(0, colon).trim().equals(name)) {
+                return line.substring(colon + 1).trim().replace("\"", "").replace("'", "");
+            }
+        }
+        return "";
+    }
+
+    private static List<String> readLines(File file) {
+        List<String> lines = new ArrayList<>();
+        if (!file.isFile()) {
+            return lines;
+        }
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                new java.io.FileInputStream(file), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                lines.add(line);
+            }
+        } catch (IOException ignored) {
+            // best effort
+        }
+        return lines;
+    }
+
+    private static String postJson(String url, String body, String key, String authHeader, String extra) {
+        java.net.HttpURLConnection conn = null;
+        try {
+            conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(20000);
+            conn.setRequestMethod("POST");
+            conn.setDoOutput(true);
+            conn.setRequestProperty("content-type", "application/json");
+            conn.setRequestProperty("accept", "text/event-stream");
+            conn.setRequestProperty(authHeader, ("Authorization".equals(authHeader) ? "Bearer " : "") + key);
+            if (extra != null) {
+                int c = extra.indexOf(':');
+                conn.setRequestProperty(extra.substring(0, c), extra.substring(c + 1).trim());
+            }
+            try (OutputStream stream = conn.getOutputStream()) {
+                stream.write(body.getBytes(StandardCharsets.UTF_8));
+            }
+            int code = conn.getResponseCode();
+            InputStreamLike in = new InputStreamLike(conn, code);
+            String text = in.read(600);
+            return "{\"status\":" + code + ",\"body\":\"" + escape(text) + "\"}";
+        } catch (Exception failure) {
+            return "{\"error\":\"" + escape(failure.toString()) + "\"}";
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
+        }
+    }
+
+    /** Minimal reader that works for both success and error bodies. */
+    private static final class InputStreamLike {
+        private final java.net.HttpURLConnection conn;
+        private final int code;
+
+        InputStreamLike(java.net.HttpURLConnection conn, int code) {
+            this.conn = conn;
+            this.code = code;
+        }
+
+        String read(int limit) throws IOException {
+            java.io.InputStream stream = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
+            if (stream == null) {
+                return "";
+            }
+            StringBuilder text = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+                char[] buffer = new char[512];
+                int read;
+                while (text.length() < limit && (read = reader.read(buffer)) > 0) {
+                    text.append(buffer, 0, read);
+                }
+            }
+            return text.length() > limit ? text.substring(0, limit) : text.toString();
+        }
+    }
+
     /**
      * Escape a string for a JSON string literal.
      *
@@ -977,6 +1259,10 @@ public final class DshService extends Service {
                     + (safetyNet != null && safetyNet.hasGood()) + "}";
         } else if ("/diag".equals(route)) {
             body = diagReport();
+        } else if ("/log".equals(route)) {
+            body = logTailReport();
+        } else if ("/net".equals(route)) {
+            body = netReport();
         } else if ("/lease".equals(route)) {
             body = handleLease(method, query);
         } else if ("/leases".equals(route)) {

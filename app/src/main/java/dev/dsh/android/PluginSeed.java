@@ -318,6 +318,11 @@ final class PluginSeed {
                     kept.put(name);
                 }
             }
+            JSONObject deps = root.optJSONObject("dependencies");
+            if (deps != null && deps.has(LEGACY_PLUGIN)) {
+                deps.remove(LEGACY_PLUGIN);
+                dropped = true;
+            }
             if (dropped) {
                 section.put("bundles", kept);
                 writeIfChanged(manifest, root.toString(2).concat("\n"));
