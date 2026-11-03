@@ -47,8 +47,6 @@ final class PluginSeed {
     private static final String CONFIG_NAME = "qqbot-guard.json";
     /** Keywords seeded on first boot; the user can edit the JSON afterwards. */
     private static final String[] DEFAULT_TRIGGERS = {"大肥鱼", "肥鱼", "鱼鱼"};
-    /** Plugin that earlier builds seeded and this one replaced; its dependencies no longer exist. */
-    private static final String LEGACY_PLUGIN = "@tencent-connect/dsh-qqbot";
 
     private PluginSeed() {
     }
@@ -74,12 +72,11 @@ final class PluginSeed {
         String installed = installedVersion(pluginDir);
         boolean refresh = shouldRefresh(pluginDir, bundled, installed);
         boolean copied = !refresh || copyPlugin(context.getAssets(), pluginDir);
-        boolean cleaned = dropLegacy(profile);
         boolean listed = ensureBundle(profile);
         ensureConfig(home);
         Log.i(TAG, "plugin seed: action=" + (refresh ? "refresh" : "keep")
                 + " bundled=" + describe(bundled) + " installed=" + describe(installed)
-                + " copied=" + copied + " listed=" + listed + " cleaned=" + cleaned
+                + " copied=" + copied + " listed=" + listed
                 + " at " + profile);
         return copied && listed;
     }
@@ -272,67 +269,6 @@ final class PluginSeed {
             Log.w(TAG, "cannot parse " + manifest, broken);
             return null;
         }
-    }
-
-    /**
-     * Remove a plugin package that an earlier build seeded and this build replaced.
-     *
-     * <p>Its dependencies are no longer in the image, so leaving it behind makes every boot log a
-     * failed import. Only the package directory and its bundle entry are touched.</p>
-     *
-     * @param profile profile directory
-     * @return true when something was removed
-     */
-    private static boolean dropLegacy(File profile) {
-        boolean changed = false;
-        File legacy = new File(profile, "node_modules/" + LEGACY_PLUGIN);
-        if (legacy.exists()) {
-            deleteRecursively(legacy);
-            changed = !legacy.exists();
-            File scope = legacy.getParentFile();
-            String[] left = scope == null ? null : scope.list();
-            if (left != null && left.length == 0) {
-                deleteRecursively(scope);
-            }
-            Log.i(TAG, "removed legacy plugin at " + legacy);
-        }
-        File manifest = new File(profile, "package.json");
-        try {
-            JSONObject root = readManifest(manifest);
-            if (root == null) {
-                return changed;
-            }
-            JSONObject dsh = root.optJSONObject("dsh");
-            JSONObject section = dsh == null ? null : dsh.optJSONObject("profile");
-            JSONArray bundles = section == null ? null : section.optJSONArray("bundles");
-            if (bundles == null) {
-                return changed;
-            }
-            JSONArray kept = new JSONArray();
-            boolean dropped = false;
-            for (int i = 0; i < bundles.length(); i++) {
-                String name = bundles.optString(i);
-                if (LEGACY_PLUGIN.equals(name)) {
-                    dropped = true;
-                } else {
-                    kept.put(name);
-                }
-            }
-            JSONObject deps = root.optJSONObject("dependencies");
-            if (deps != null && deps.has(LEGACY_PLUGIN)) {
-                deps.remove(LEGACY_PLUGIN);
-                dropped = true;
-            }
-            if (dropped) {
-                section.put("bundles", kept);
-                writeIfChanged(manifest, root.toString(2).concat("\n"));
-                Log.i(TAG, "dropped legacy bundle " + LEGACY_PLUGIN);
-                changed = true;
-            }
-        } catch (Exception error) {
-            Log.w(TAG, "cannot clean legacy bundles", error);
-        }
-        return changed;
     }
 
     /**
