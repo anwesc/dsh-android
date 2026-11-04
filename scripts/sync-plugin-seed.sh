@@ -20,9 +20,9 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 asset_dir="$repo/app/src/main/assets/plugin-seed/dsh-qqbot-guard"
 version_file="$repo/scripts/plugin-seed.version"
 # Only what the loader and the settings page need at runtime; tests and README stay in the plugin repo.
-# client/client.js is the client-side bundle for the DSH settings section: without it the plugin
-# still works, but there is no way to configure it from the UI.
-files=(index.js package.json cordis.patch.yml client/client.js)
+# client/ is the client-side bundle for the DSH settings section; assets/ holds the stickers the
+# plugin sends with replies (missing it breaks sticker sends at runtime, not at boot).
+entries=(index.js package.json cordis.patch.yml client assets)
 
 check_only=false
 if [[ "${1:-}" == "--check" ]]; then
@@ -58,37 +58,48 @@ fi
 
 if $check_only; then
   stale=0
-  for file in "${files[@]}"; do
-    if ! cmp -s "$source_dir/$file" "$asset_dir/$file"; then
-      echo "stale or missing: app/src/main/assets/plugin-seed/dsh-qqbot-guard/$file (pinned $spec)" >&2
+  for entry in "${entries[@]}"; do
+    if [[ ! -e "$source_dir/$entry" ]]; then
+      echo "missing in source: $entry (pinned $spec)" >&2
+      stale=1
+      continue
+    fi
+    if [[ -d "$source_dir/$entry" ]]; then
+      if ! diff -r -q "$source_dir/$entry" "$asset_dir/$entry" >/dev/null 2>&1; then
+        echo "stale or missing: app/src/main/assets/plugin-seed/dsh-qqbot-guard/$entry/ (pinned $spec)" >&2
+        stale=1
+      fi
+    elif ! cmp -s "$source_dir/$entry" "$asset_dir/$entry"; then
+      echo "stale or missing: app/src/main/assets/plugin-seed/dsh-qqbot-guard/$entry (pinned $spec)" >&2
       stale=1
     fi
   done
-  # A file that is no longer part of the seed must not linger either.
+  # A top-level entry that is no longer part of the seed must not linger either.
   while read -r extra; do
+    [[ -z "$extra" ]] && continue
     echo "unexpected asset: app/src/main/assets/plugin-seed/dsh-qqbot-guard/$extra (pinned $spec)" >&2
     stale=1
   done < <(
-    comm -13 <(printf '%s\n' "${files[@]}" | sort) \
-             <(cd "$asset_dir" 2>/dev/null && find . -type f -printf '%P\n' | sort)
+    comm -13 <(printf '%s\n' "${entries[@]}" | sort) \
+             <(cd "$asset_dir" 2>/dev/null && find . -mindepth 1 -maxdepth 1 -printf '%P\n' | sort)
   )
   exit "$stale"
 fi
 
-for file in "${files[@]}"; do
-  mkdir -p "$asset_dir/$(dirname "$file")"
-  cp -f "$source_dir/$file" "$asset_dir/$file"
-  echo "synced $file"
+for entry in "${entries[@]}"; do
+  rm -rf "$asset_dir/$entry"
+  mkdir -p "$asset_dir/$(dirname "$entry")"
+  cp -R "$source_dir/$entry" "$asset_dir/$entry"
+  echo "synced $entry"
 done
 
 # Keep the asset tree minimal: anything else would be copied into the profile as well.
-comm -13 <(printf '%s\n' "${files[@]}" | sort) \
-         <(cd "$asset_dir" && find . -type f -printf '%P\n' | sort) |
+comm -13 <(printf '%s\n' "${entries[@]}" | sort) \
+         <(cd "$asset_dir" && find . -mindepth 1 -maxdepth 1 -printf '%P\n' | sort) |
   while read -r extra; do
+    [[ -z "$extra" ]] && continue
     echo "removing unexpected asset: $extra" >&2
-    rm -f "$asset_dir/$extra"
-    # 清掉因此变空的子目录（client/ 被替换时会出现）
-    rmdir "$(dirname "$asset_dir/$extra")" 2>/dev/null || true
+    rm -rf "$asset_dir/$extra"
   done
 
 echo "plugin seed ready: $asset_dir ($spec)"

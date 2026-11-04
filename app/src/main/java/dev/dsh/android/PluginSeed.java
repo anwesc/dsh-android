@@ -71,6 +71,11 @@ final class PluginSeed {
         String bundled = bundledVersion(context.getAssets());
         String installed = installedVersion(pluginDir);
         boolean refresh = shouldRefresh(pluginDir, bundled, installed);
+        if (!refresh && seedHasAssets(context.getAssets())
+                && !new File(pluginDir, "assets").isDirectory()) {
+            Log.i(TAG, "bundled plugin carries assets the installed copy lacks; refreshing");
+            refresh = true;
+        }
         boolean copied = !refresh || copyPlugin(context.getAssets(), pluginDir);
         boolean listed = ensureBundle(profile);
         ensureConfig(home);
@@ -202,8 +207,26 @@ final class PluginSeed {
      * @param destination destination file or directory
      * @return true when everything under the asset was written
      */
-    private static boolean copyAssetTree(AssetManager assets, String assetPath, File destination) {
-        String[] children = null;
+    /**
+     * Whether the bundled plugin ships a non-empty {@code assets/} directory.
+     *
+     * <p>Seeds built before 1.0.11 only carried code files, so an installed copy that predates
+     * the assets still looks complete to {@link #shouldRefresh}. Checking the seed lets the next
+     * boot repair that without bumping the package version.</p>
+     *
+     * @param assets asset manager
+     * @return true when {@code plugin-seed/<plugin>/assets} has entries
+     */
+    private static boolean seedHasAssets(AssetManager assets) {
+        try {
+            String[] entries = assets.list(ASSET_DIR + "/assets");
+            return entries != null && entries.length > 0;
+        } catch (Exception error) {
+            return false;
+        }
+    }
+
+    private static boolean copyAssetTree(AssetManager assets, String assetPath, File destination) {        String[] children = null;
         try {
             children = assets.list(assetPath);
         } catch (Exception ignored) {

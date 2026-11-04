@@ -13,3 +13,12 @@ app/src/main/assets/runtime/libexec/loader binary
 plugins/qqbot-guard/* text eol=lf
 app/src/main/assets/plugin-seed/** text eol=lf
 
+
+# Binary assets under the plugin seed must never be normalized, even though the
+# line above marks the whole seed tree as text.
+app/src/main/assets/plugin-seed/**/*.png -text
+app/src/main/assets/plugin-seed/**/*.jpg -text
+app/src/main/assets/plugin-seed/**/*.jpeg -text
+app/src/main/assets/plugin-seed/**/*.webp -text
+app/src/main/assets/plugin-seed/**/*.gif -text
+app/src/main/assets/plugin-seed/**/*.mp3 -text
